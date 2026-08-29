@@ -6,7 +6,11 @@ const { completion, extractText, promptText, selectModel } = require("./models.t
 
 function createChatHandler({ client, directory, defaultModel }) {
   async function resolveModel(name) {
-    return selectModel(await client.providers(), name || defaultModel);
+    const requested = name || defaultModel;
+    // OpenAI clients send provider/model. It is already sufficient for
+    // OpenCode, so do not load the multi-MB provider catalog per request.
+    if (requested.includes("/")) return selectModel(undefined, requested);
+    return selectModel(await client.providers(), requested);
   }
 
   async function sendMessage(sessionId, payload) {

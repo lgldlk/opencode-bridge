@@ -13,7 +13,7 @@ function rateLimitHeaders(registry) {
   return remainingMs ? { "retry-after": String(Math.max(1, Math.ceil(remainingMs / 1000))) } : {};
 }
 
-function completionProxy({ registry, requestTimeoutMs }) {
+function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs = 12_000 }) {
   async function proxy(req, res, body) {
     const model = body.model;
     const pool = registry.candidates(model);
@@ -127,6 +127,8 @@ function completionProxy({ registry, requestTimeoutMs }) {
       for (const machine of pool) {
         if (closed) return;
         activeController = new AbortController();
+        const connectTimer = setTimeout(() => activeController?.abort(new Error("upstream response headers timed out")), upstreamConnectTimeoutMs);
+        connectTimer.unref?.();
         try {
           const response = await registry.fetchMachine(machine, "/v1/chat/completions", {
             method: "POST",
@@ -134,6 +136,7 @@ function completionProxy({ registry, requestTimeoutMs }) {
             body: payload,
             signal: activeController.signal,
           }, requestTimeoutMs);
+          clearTimeout(connectTimer);
           console.log(`[stream] machine=${machine.id} headers=${response.status} after=${Date.now()}`);
           if (response.ok) {
             registry.markHealthy(machine);
@@ -175,11 +178,13 @@ function completionProxy({ registry, requestTimeoutMs }) {
           otherFailure = true;
           registry.markFailure(machine, lastError);
         } catch (error) {
+          clearTimeout(connectTimer);
           if (closed) return;
           lastError = error;
           otherFailure = true;
           registry.markFailure(machine, error);
         } finally {
+          clearTimeout(connectTimer);
           activeController = null;
         }
       }

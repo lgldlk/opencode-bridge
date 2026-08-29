@@ -16,6 +16,7 @@ function managerConfig(env = process.env) {
     adminKey: env.MANAGER_ADMIN_KEY || "",
     clientKey: env.MANAGER_API_KEY || "",
     requestTimeoutMs: Number(env.MANAGER_REQUEST_TIMEOUT_MS || 15 * 60 * 1000),
+    upstreamConnectTimeoutMs: Number(env.MANAGER_UPSTREAM_CONNECT_TIMEOUT_MS || 12_000),
     healthIntervalMs: Number(env.MANAGER_HEALTH_INTERVAL_MS || 30_000),
     routingStrategy: env.MANAGER_ROUTING_STRATEGY || undefined,
     rateLimitCooldownMs: env.MANAGER_RATE_LIMIT_COOLDOWN_MS || undefined,
@@ -26,7 +27,11 @@ function managerConfig(env = process.env) {
 function createManagerApp(config = managerConfig()) {
   const registry = createRegistry(config);
   const admin = createAdminRouter({ registry, adminKey: config.adminKey, webDir: config.webDir });
-  const completions = completionProxy({ registry, requestTimeoutMs: config.requestTimeoutMs });
+  const completions = completionProxy({
+    registry,
+    requestTimeoutMs: config.requestTimeoutMs,
+    upstreamConnectTimeoutMs: config.upstreamConnectTimeoutMs,
+  });
 
   function clientAuthorized(req) {
     return hasValidToken(req, config.clientKey || registry.config.apiKey || registry.config.adminKey || "");
