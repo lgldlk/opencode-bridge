@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenAI compatible proxy for OpenCode
+After=opencode.service
+Requires=opencode.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/opencode-bridge.env
+ExecStart=/usr/bin/node --experimental-strip-types /opt/opencode-bridge/src/machine.ts
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

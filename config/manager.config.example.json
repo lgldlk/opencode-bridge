@@ -1,0 +1,14 @@
+{
+  "adminKey": "replace-with-a-long-random-admin-key",
+  "apiKey": "replace-with-a-long-random-client-key",
+  "machines": [
+    {
+      "id": "machine-01",
+      "name": "Example OpenCode host",
+      "baseUrl": "https://machine-01.example.internal",
+      "apiKey": "sk-replace-with-machine-bridge-key",
+      "enabled": true,
+      "weight": 1
+    }
+  ]
+}

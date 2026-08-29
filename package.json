@@ -1,0 +1,18 @@
+{
+  "name": "opencode-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenCode OpenAI-compatible machine bridge and health-aware manager",
+  "type": "commonjs",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start:machine": "node --experimental-strip-types src/machine.ts",
+    "start:manager": "node --experimental-strip-types src/manager.ts",
+    "test": "node --experimental-strip-types --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}
