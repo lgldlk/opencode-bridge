@@ -59,7 +59,11 @@ DIRECTORY_VALUE="${OPENCODE_DIRECTORY:-$RUN_HOME}"
 
 install -d -m 0755 /opt/opencode-bridge
 install -d -m 0755 /opt/opencode-bridge/src
+install -d -m 0755 /opt/opencode-bridge/src/machine
+install -d -m 0755 /opt/opencode-bridge/src/shared
 install -m 0644 "$ROOT_DIR/../src/machine.ts" /opt/opencode-bridge/src/machine.ts
+install -m 0644 "$ROOT_DIR/../src/machine/"*.ts /opt/opencode-bridge/src/machine/
+install -m 0644 "$ROOT_DIR/../src/shared/"*.ts /opt/opencode-bridge/src/shared/
 
 # The env file is deliberately write-once: rotating secrets is an explicit
 # operator action and must not happen accidentally during a redeploy.

@@ -24,8 +24,9 @@ OpenCode 的机器部署一个 `machine` 适配器；可选部署一个 `manager
 
 目录说明：
 
-- `src/machine.ts`：单机 OpenCode 到 OpenAI API 的适配器。
-- `src/manager.ts`：多机器注册、健康检查、模型聚合与路由。
+- `src/machine.ts`：机器端入口，实际逻辑位于 `src/machine/`。
+- `src/manager.ts`：管理端入口，实际逻辑位于 `src/manager/`。
+- `src/shared/`：机器端和管理端共用的 HTTP、鉴权工具。
 - `web/`：无依赖的浏览器管理界面。
 - `deploy/`：机器端和管理端部署脚本。
 - `systemd/`：服务单元文件。

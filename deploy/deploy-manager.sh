@@ -7,8 +7,12 @@ ROOT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
 
 install -d -m 0755 /opt/opencode-bridge
 install -d -m 0755 /opt/opencode-bridge/src
+install -d -m 0755 /opt/opencode-bridge/src/manager
+install -d -m 0755 /opt/opencode-bridge/src/shared
 install -d -m 0755 /opt/opencode-bridge/web
-install -m 0755 "$ROOT_DIR/../src/manager.ts" /opt/opencode-bridge/src/manager.ts
+install -m 0644 "$ROOT_DIR/../src/manager.ts" /opt/opencode-bridge/src/manager.ts
+install -m 0644 "$ROOT_DIR/../src/manager/"*.ts /opt/opencode-bridge/src/manager/
+install -m 0644 "$ROOT_DIR/../src/shared/"*.ts /opt/opencode-bridge/src/shared/
 install -m 0644 "$ROOT_DIR/../web/admin.html" "$ROOT_DIR/../web/admin.css" "$ROOT_DIR/../web/admin.js" /opt/opencode-bridge/web/
 install -m 0644 "$ROOT_DIR/../systemd/opencode-manager.service" /etc/systemd/system/opencode-manager.service
 

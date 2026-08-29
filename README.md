@@ -13,8 +13,11 @@ does not generate, modify, or buffer model output.
 This project has two deployment roles:
 
 ```text
-src/machine.ts   per-machine OpenCode adapter
-src/manager.ts   control plane and health-aware failover
+src/machine.ts   machine entry point
+src/manager.ts   manager entry point
+src/machine/     OpenCode client, model mapping, and completion handling
+src/manager/     registry, admin API, and completion routing
+src/shared/      shared HTTP and authentication utilities
 web/             dependency-free browser admin console
 deploy/          idempotent root deployment scripts
 systemd/         service units
