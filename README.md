@@ -1,5 +1,7 @@
 # OpenCode Bridge
 
+[中文文档](README.zh-CN.md)
+
 An OpenAI-compatible gateway for self-hosted OpenCode instances. Deploy a
 machine adapter next to each OpenCode server, then optionally run one manager
 that exposes a single endpoint, discovers available models, monitors machine
