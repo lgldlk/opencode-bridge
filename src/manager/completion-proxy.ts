@@ -1,6 +1,7 @@
 "use strict";
 
 const { Readable } = require("node:stream");
+const { once } = require("node:events");
 const { json, sseHeaders } = require("../shared/http.ts");
 
 function retryableStatus(status) {
@@ -100,6 +101,13 @@ function completionProxy({ registry, requestTimeoutMs }) {
     const writeSse = (value) => {
       if (!closed && !res.writableEnded) res.write(`data: ${typeof value === "string" ? value : JSON.stringify(value)}\n\n`);
     };
+    const writeChunk = async (chunk) => {
+      if (closed || res.writableEnded) return false;
+      if (res.write(chunk)) return true;
+      // Do not truncate an SSE response when the client socket applies backpressure.
+      await Promise.race([once(res, "drain"), once(res, "close")]);
+      return !closed && !res.writableEnded;
+    };
     const finish = () => {
       if (!closed && !res.writableEnded) res.end(upstreamDone ? undefined : "data: [DONE]\n\n");
       clearInterval(heartbeat);
@@ -128,16 +136,19 @@ function completionProxy({ registry, requestTimeoutMs }) {
             if (!response.body) return finish();
             const reader = response.body.getReader();
             try {
+              let doneTail = "";
               while (!closed) {
                 const next = await reader.read();
                 if (next.done) break;
                 if (next.value?.byteLength) {
                   const chunk = Buffer.from(next.value);
-                  if (chunk.toString("utf8").includes("data: [DONE]")) upstreamDone = true;
-                  if (!res.write(chunk)) break;
+                  doneTail = `${doneTail}${chunk.toString("utf8")}`.slice(-32);
+                  if (doneTail.includes("data: [DONE]")) upstreamDone = true;
+                  if (!await writeChunk(chunk)) break;
                 }
               }
             } finally {
+              if (closed) await reader.cancel().catch(() => {});
               reader.releaseLock();
             }
             return finish();

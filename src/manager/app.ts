@@ -74,6 +74,10 @@ function start(config = managerConfig()) {
   }, config.healthIntervalMs);
   interval.unref();
   const server = http.createServer((req, res) => routeSafe(app, req, res));
+  // Completion streams may legitimately remain open for many minutes.
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.keepAliveTimeout = 75_000;
   // Transport-only settings: do not add, buffer, or rewrite SSE model frames.
   server.on("connection", (socket) => {
     socket.setNoDelay(true);
