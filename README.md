@@ -45,9 +45,10 @@ intended to be installed on the OpenCode host; keep the generated env file mode
 ## Manager and machine deployment
 
 `src/manager.ts` is an optional control plane. It keeps an explicit machine registry,
-polls `/health` and `/v1/models`, aggregates models, and fails over a completion
-only when a machine is unreachable or returns `502`, `503`, or `504`. It does not
-silently bypass `429` quota responses. The manager client API uses
+polls `/health` and `/v1/models`, aggregates models, and routes every completion
+with either round-robin or random selection. A machine that returns `429` is put in
+cooldown for one hour by default, so later requests go directly to an eligible
+machine instead of wasting a request on the rate-limited machine. The manager client API uses
 `MANAGER_API_KEY`; registry changes use `MANAGER_ADMIN_KEY`.
 
 Install the machine side as root on each OpenCode host:
@@ -90,7 +91,13 @@ curl -X PUT http://MANAGER:8090/admin/machines/sg-01 \
 
 The manager exposes the same `GET /v1/models` and `POST /v1/chat/completions`
 paths as a machine, plus `GET /admin/machines` and per-machine `check`,
-`enable`, and `disable` actions.
+`enable`, and `disable` actions. `GET`/`PUT /admin/routing` configures
+`strategy` (`round_robin` or `random`) and `rateLimitCooldownMs`. The same settings
+are available in the browser console. The persistent default is 3,600,000 ms.
+
+`MANAGER_ROUTING_STRATEGY` and `MANAGER_RATE_LIMIT_COOLDOWN_MS` are optional
+environment hard overrides; leave them unset to allow changes from the console to
+take effect.
 
 The browser console is available at `http://MANAGER:8090/admin`. It does not
 embed credentials: enter `MANAGER_ADMIN_KEY` in the login prompt. The key is

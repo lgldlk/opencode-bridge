@@ -17,6 +17,8 @@ function managerConfig(env = process.env) {
     clientKey: env.MANAGER_API_KEY || "",
     requestTimeoutMs: Number(env.MANAGER_REQUEST_TIMEOUT_MS || 15 * 60 * 1000),
     healthIntervalMs: Number(env.MANAGER_HEALTH_INTERVAL_MS || 30_000),
+    routingStrategy: env.MANAGER_ROUTING_STRATEGY || undefined,
+    rateLimitCooldownMs: env.MANAGER_RATE_LIMIT_COOLDOWN_MS || undefined,
     webDir: path.join(__dirname, "../../web"),
   };
 }
@@ -37,7 +39,12 @@ function createManagerApp(config = managerConfig()) {
     if (req.method === "GET" && url.pathname === "/admin.js") return admin.serveAsset(res, "js");
     if (req.method === "GET" && url.pathname === "/health") {
       const machines = registry.config.machines.map((machine) => registry.publicMachine(machine));
-      return json(res, 200, { ok: true, machines: machines.length, healthy: machines.filter((machine) => machine.status === "healthy").length });
+      return json(res, 200, {
+        ok: true,
+        machines: machines.length,
+        healthy: machines.filter((machine) => machine.status === "healthy" && machine.routingEligible).length,
+        coolingDown: machines.filter((machine) => machine.cooldownRemainingMs > 0).length,
+      });
     }
     if (url.pathname.startsWith("/admin/")) return admin.route(req, res, url);
     if (req.method === "GET" && url.pathname === "/v1/models") {

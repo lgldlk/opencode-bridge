@@ -3,6 +3,21 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+const ROUTING_STRATEGIES = new Set(["round_robin", "random"]);
+const DEFAULT_ROUTING = Object.freeze({
+  strategy: "round_robin",
+  rateLimitCooldownMs: 60 * 60 * 1000,
+});
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function normalizeStrategy(value) {
+  return ROUTING_STRATEGIES.has(value) ? value : DEFAULT_ROUTING.strategy;
+}
+
 function loadConfig(configPath) {
   try {
     const value = JSON.parse(fs.readFileSync(configPath, "utf8"));
@@ -14,10 +29,27 @@ function loadConfig(configPath) {
   }
 }
 
-function createRegistry({ configPath, requestTimeoutMs }) {
+function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLimitCooldownMs }) {
   let config = loadConfig(configPath);
   const state = new Map();
   let roundRobin = 0;
+
+  function routing() {
+    const saved = config.routing || {};
+    return {
+      strategy: normalizeStrategy(routingStrategy ?? saved.strategy),
+      rateLimitCooldownMs: positiveInteger(rateLimitCooldownMs ?? saved.rateLimitCooldownMs, DEFAULT_ROUTING.rateLimitCooldownMs),
+    };
+  }
+
+  function cooldownUntil(machine) {
+    const timestamp = Date.parse(machine.cooldownUntil || "");
+    return Number.isFinite(timestamp) && timestamp > Date.now() ? timestamp : null;
+  }
+
+  function isCoolingDown(machine) {
+    return cooldownUntil(machine) !== null;
+  }
 
   function stateFor(machine) {
     if (!state.has(machine.id)) {
@@ -35,12 +67,16 @@ function createRegistry({ configPath, requestTimeoutMs }) {
 
   function publicMachine(machine) {
     const runtime = stateFor(machine);
+    const until = cooldownUntil(machine);
     return {
       id: machine.id,
       name: machine.name || machine.id,
       baseUrl: machine.baseUrl,
       enabled: machine.enabled !== false,
       weight: machine.weight || 1,
+      cooldownUntil: until ? new Date(until).toISOString() : null,
+      cooldownRemainingMs: until ? until - Date.now() : 0,
+      routingEligible: machine.enabled !== false && !until,
       ...runtime,
     };
   }
@@ -96,7 +132,7 @@ function createRegistry({ configPath, requestTimeoutMs }) {
   }
 
   function candidates(model) {
-    const enabled = config.machines.filter((machine) => machine.enabled !== false);
+    const enabled = config.machines.filter((machine) => machine.enabled !== false && !isCoolingDown(machine));
     const matching = model ? enabled.filter((machine) => {
       const models = stateFor(machine).models;
       return !models.length || models.includes(model);
@@ -105,8 +141,41 @@ function createRegistry({ configPath, requestTimeoutMs }) {
     const healthy = pool.filter((machine) => stateFor(machine).status === "healthy");
     const usable = healthy.length ? healthy : pool;
     if (!usable.length) return [];
+    if (routing().strategy === "random") {
+      const shuffled = [...usable];
+      for (let index = shuffled.length - 1; index > 0; index -= 1) {
+        const selected = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[selected]] = [shuffled[selected], shuffled[index]];
+      }
+      return shuffled;
+    }
     const start = roundRobin++ % usable.length;
     return usable.slice(start).concat(usable.slice(0, start));
+  }
+
+  async function cooldown(machine) {
+    const until = new Date(Date.now() + routing().rateLimitCooldownMs).toISOString();
+    machine.cooldownUntil = until;
+    await save();
+    return until;
+  }
+
+  function nextCooldownMs() {
+    const times = config.machines.map(cooldownUntil).filter((value) => value !== null);
+    return times.length ? Math.max(0, Math.min(...times) - Date.now()) : 0;
+  }
+
+  function updateRouting(input) {
+    const current = routing();
+    const next = {
+      strategy: input.strategy === undefined ? current.strategy : normalizeStrategy(input.strategy),
+      rateLimitCooldownMs: input.rateLimitCooldownMs === undefined
+        ? current.rateLimitCooldownMs
+        : positiveInteger(input.rateLimitCooldownMs, 0),
+    };
+    if (!next.rateLimitCooldownMs) throw new Error("rateLimitCooldownMs must be a positive integer");
+    config.routing = next;
+    return routing();
   }
 
   async function save() {
@@ -128,16 +197,21 @@ function createRegistry({ configPath, requestTimeoutMs }) {
   return {
     candidates,
     check,
+    cooldown,
     fetchMachine,
     find,
     get config() { return config; },
     markFailure,
     markHealthy,
+    nextCooldownMs,
     publicMachine,
     remove,
     save,
     stateFor,
+    isCoolingDown,
+    routing,
+    updateRouting,
   };
 }
 
-module.exports = { createRegistry, loadConfig };
+module.exports = { DEFAULT_ROUTING, ROUTING_STRATEGIES, createRegistry, loadConfig };

@@ -9,12 +9,13 @@ const { spawn } = require("node:child_process");
 const root = path.resolve(__dirname, "..");
 
 function mockMachine(mode = "ok") {
-  const state = { mode };
+  const state = { mode, completionRequests: 0 };
   const server = http.createServer(async (req, res) => {
     if (req.headers.authorization !== "Bearer machine-key") return res.writeHead(401).end();
     if (req.url === "/health") return res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
     if (req.url === "/v1/models") return res.writeHead(200, { "content-type": "application/json" }).end('{"data":[{"id":"opencode/big-pickle"}]}');
     if (req.url === "/v1/chat/completions") {
+      state.completionRequests += 1;
       if (state.mode === "fail") return res.writeHead(503, { "content-type": "application/json" }).end('{"error":{"message":"offline"}}');
       if (state.mode === "rate") return res.writeHead(429, { "retry-after": "10", "content-type": "application/json" }).end('{"error":{"message":"rate limited"}}');
       let body = "";
@@ -52,7 +53,7 @@ async function freePort() {
   return port;
 }
 
-test("manager aggregates models and fails over server errors, not 429", async (t) => {
+test("manager cools rate-limited machines and fails over without retrying them", async (t) => {
   const first = await mockMachine("fail");
   const second = await mockMachine("ok");
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-"));
@@ -74,10 +75,31 @@ test("manager aggregates models and fails over server errors, not 429", async (t
   const completion = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "hi" }] }) });
   assert.equal(completion.status, 200);
   assert.equal((await completion.json()).choices[0].message.content, "ok");
+
+  // Consume the next round-robin position, so this request starts with `first`.
+  const secondSuccess = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "hi" }] }) });
+  assert.equal(secondSuccess.status, 200);
   first.state.mode = "rate";
+  await fetch(`${base}/admin/machines/first/check`, { method: "POST", headers: { authorization: "Bearer admin-key" } });
+  const firstAttempts = first.state.completionRequests;
+  const failover = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "hi" }] }) });
+  assert.equal(failover.status, 200);
+  assert.equal(first.state.completionRequests, firstAttempts + 1);
+  const machines = await fetch(`${base}/admin/machines`, { headers: { authorization: "Bearer admin-key" } }).then((r) => r.json());
+  assert.ok(machines.data.find((machine) => machine.id === "first").cooldownRemainingMs > 3_500_000);
+
+  const attemptsDuringCooldown = first.state.completionRequests;
+  const skipped = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "hi" }] }) });
+  assert.equal(skipped.status, 200);
+  assert.equal(first.state.completionRequests, attemptsDuringCooldown);
+
   second.state.mode = "rate";
   const rate = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "hi" }] }) });
   assert.equal(rate.status, 429);
+  assert.ok(Number(rate.headers.get("retry-after")) >= 3500);
+
+  const routing = await fetch(`${base}/admin/routing`, { method: "PUT", headers: { authorization: "Bearer admin-key", "content-type": "application/json" }, body: JSON.stringify({ strategy: "random", rateLimitCooldownMs: 120_000 }) });
+  assert.deepEqual(await routing.json(), { strategy: "random", rateLimitCooldownMs: 120_000 });
 });
 
 test("manager serves the admin console without exposing machine secrets", async (t) => {

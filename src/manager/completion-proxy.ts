@@ -7,12 +7,28 @@ function retryableStatus(status) {
   return status === 502 || status === 503 || status === 504;
 }
 
+function rateLimitHeaders(registry) {
+  const remainingMs = registry.nextCooldownMs();
+  return remainingMs ? { "retry-after": String(Math.max(1, Math.ceil(remainingMs / 1000))) } : {};
+}
+
 function completionProxy({ registry, requestTimeoutMs }) {
   async function proxy(req, res, body) {
     const model = body.model;
     const pool = registry.candidates(model);
     console.log(`[request] stream=${body.stream === true} model=${model || "<default>"} bytes=${req.headers["content-length"] || "?"} remote=${req.socket.remoteAddress || "?"}`);
-    if (!pool.length) return json(res, 503, { error: { message: "No enabled machines are registered", type: "service_unavailable" } });
+    if (!pool.length) {
+      const headers = rateLimitHeaders(registry);
+      if (Object.keys(headers).length) {
+        if (body.stream === true) {
+          res.writeHead(200, sseHeaders());
+          res.end(`data: ${JSON.stringify({ error: { message: "All eligible machines are cooling down", type: "rate_limit_error", retry_after: Number(headers["retry-after"]) } })}\n\ndata: [DONE]\n\n`);
+          return;
+        }
+        return json(res, 429, { error: { message: "All eligible machines are cooling down", type: "rate_limit_error" } }, headers);
+      }
+      return json(res, 503, { error: { message: "No enabled machines are registered", type: "service_unavailable" } });
+    }
     const payload = JSON.stringify(body);
     return body.stream === true
       ? proxyStream(req, res, pool, payload, model)
@@ -21,6 +37,8 @@ function completionProxy({ registry, requestTimeoutMs }) {
 
   async function proxyJson(res, pool, payload) {
     let lastError;
+    let rateLimited = null;
+    let otherFailure = false;
     for (const machine of pool) {
       try {
         const response = await registry.fetchMachine(machine, "/v1/chat/completions", {
@@ -34,17 +52,30 @@ function completionProxy({ registry, requestTimeoutMs }) {
           if (response.body) return Readable.fromWeb(response.body).pipe(res);
           return res.end();
         }
+        if (response.status === 429) {
+          const text = await response.text();
+          let details;
+          try { details = text ? JSON.parse(text) : undefined; } catch { details = undefined; }
+          rateLimited = details?.error?.message || text || `${machine.id} is rate limited`;
+          await registry.cooldown(machine);
+          continue;
+        }
         if (!retryableStatus(response.status)) {
           res.writeHead(response.status, { "content-type": response.headers.get("content-type") || "application/json" });
           return res.end(await response.text());
         }
         await response.body?.cancel();
         lastError = new Error(`${machine.id} returned ${response.status}`);
+        otherFailure = true;
         registry.markFailure(machine, lastError);
       } catch (error) {
         registry.markFailure(machine, error);
         lastError = error;
+        otherFailure = true;
       }
+    }
+    if (rateLimited && !otherFailure) {
+      return json(res, 429, { error: { message: rateLimited, type: "rate_limit_error" } }, rateLimitHeaders(registry));
     }
     return json(res, 503, { error: { message: lastError?.message || "All machines failed", type: "service_unavailable" } });
   }
@@ -78,6 +109,8 @@ function completionProxy({ registry, requestTimeoutMs }) {
 
     console.log(`[stream] headers-sent model=${model || "<default>"} machines=${pool.map((item) => item.id).join(",")}`);
     let lastError;
+    let rateLimited = null;
+    let otherFailure = false;
     try {
       for (const machine of pool) {
         if (closed) return;
@@ -114,21 +147,34 @@ function completionProxy({ registry, requestTimeoutMs }) {
           let details;
           try { details = text ? JSON.parse(text) : undefined; } catch { details = undefined; }
           const message = details?.error?.message || text || `${machine.id} returned ${response.status}`;
+          if (response.status === 429) {
+            rateLimited = message;
+            await registry.cooldown(machine);
+            continue;
+          }
           if (!retryableStatus(response.status)) {
             writeSse({ error: { message, type: response.status === 429 ? "rate_limit_error" : "upstream_error", code: response.status } });
             return finish();
           }
           lastError = new Error(message);
+          otherFailure = true;
           registry.markFailure(machine, lastError);
         } catch (error) {
           if (closed) return;
           lastError = error;
+          otherFailure = true;
           registry.markFailure(machine, error);
         } finally {
           activeController = null;
         }
       }
-      if (!closed) writeSse({ error: { message: lastError?.message || "All machines failed", type: "service_unavailable" } });
+      if (!closed) {
+        if (rateLimited && !otherFailure) {
+          writeSse({ error: { message: rateLimited, type: "rate_limit_error", retry_after: Math.max(1, Math.ceil(registry.nextCooldownMs() / 1000)) } });
+        } else {
+          writeSse({ error: { message: lastError?.message || "All machines failed", type: "service_unavailable" } });
+        }
+      }
     } finally {
       finish();
     }
@@ -137,4 +183,4 @@ function completionProxy({ registry, requestTimeoutMs }) {
   return { proxy };
 }
 
-module.exports = { completionProxy, retryableStatus };
+module.exports = { completionProxy, rateLimitHeaders, retryableStatus };

@@ -38,6 +38,22 @@ function createAdminRouter({ registry, adminKey, webDir }) {
     const id = parts[2];
     const machine = id ? registry.find(id) : null;
 
+    if (parts[1] === "routing" && !id) {
+      if (req.method === "GET") return json(res, 200, registry.routing());
+      if (req.method === "PUT") {
+        const input = await readJsonBody(req);
+        if (input.strategy !== undefined && !["round_robin", "random"].includes(input.strategy)) {
+          return json(res, 400, { error: { message: "strategy must be round_robin or random" } });
+        }
+        if (input.rateLimitCooldownMs !== undefined && (!Number.isFinite(Number(input.rateLimitCooldownMs)) || Number(input.rateLimitCooldownMs) <= 0)) {
+          return json(res, 400, { error: { message: "rateLimitCooldownMs must be a positive number" } });
+        }
+        const routing = registry.updateRouting(input);
+        await registry.save();
+        return json(res, 200, routing);
+      }
+    }
+
     if (req.method === "GET" && parts[1] === "machines" && !id) {
       return json(res, 200, { data: registry.config.machines.map((item) => registry.publicMachine(item)) });
     }

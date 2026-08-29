@@ -32,6 +32,15 @@
       <div class="stat"><span>可用模型</span><strong id="stat-models">-</strong></div>
     </section>
 
+    <section class="panel routing-panel">
+      <div class="panel-head"><div><h2>调用策略</h2><p class="muted">额度耗尽的机器会进入冷却，期间不会接收新请求</p></div></div>
+      <form class="routing-form" id="routing-form">
+        <label>机器选择<select id="routing-strategy"><option value="round_robin">自动轮询</option><option value="random">随机</option></select></label>
+        <label>限流冷却时间（分钟）<input id="routing-cooldown-minutes" type="number" min="1" max="10080" step="1" value="60" required></label>
+        <div class="routing-actions"><span class="form-error" id="routing-error"></span><button class="button button-primary" type="submit">保存策略</button></div>
+      </form>
+    </section>
+
     <section class="panel">
       <div class="panel-head"><div><h2>机器列表</h2><p class="muted">实时状态与路由配置</p></div><span class="connection" id="connection">未连接</span></div>
       <div class="machine-list" id="machines"><div class="empty">输入管理密钥后载入机器</div></div>

@@ -114,10 +114,26 @@ storage 中，并用于调用已有的受保护管理 API。
 manager 会轮询每台已启用机器的 `/health` 和 `/v1/models`，并聚合可用模型。
 
 - 上游不可连接或返回 `502`、`503`、`504` 时，会尝试下一台健康机器。
-- `429` 限流响应不会被静默绕过，保留原始配额和 `Retry-After` 语义。
-- 请求指定模型时优先挑选声明该模型的机器；未指定时在可用机器间轮询。
+- 某机器返回 `429` 额度/限流时，manager 会立即将该机器置为冷却状态，并在同一次
+  请求中尝试下一台。冷却中机器不会再参与新请求，因此不会把时间浪费在已经无额度的机器上。
+- 默认冷却 1 小时。冷却到期后机器自动重新参与路由，不需要手工启用。
+- 请求指定模型时优先挑选声明该模型的机器；未指定时在可用机器间轮询。策略可设置为
+  `round_robin`（自动轮询）或 `random`（随机）。
 - 单次请求与长时间流式响应默认允许 60 分钟，可通过
   `OPENCODE_REQUEST_TIMEOUT_MS` 和 `MANAGER_REQUEST_TIMEOUT_MS` 调整。
+
+在管理界面可直接修改“机器选择”和“限流冷却时间（分钟）”。API 也可调用：
+
+```sh
+curl -X PUT http://MANAGER:8090/admin/routing \
+  -H 'Authorization: Bearer ADMIN_KEY' \
+  -H 'content-type: application/json' \
+  -d '{"strategy":"random","rateLimitCooldownMs":3600000}'
+```
+
+配置会保存到 `/etc/opencode-manager.json` 的 `routing` 字段。若设置了
+`MANAGER_ROUTING_STRATEGY` 或 `MANAGER_RATE_LIMIT_COOLDOWN_MS`，环境变量会强制覆盖
+管理界面的值；需要在管理界面调整时，请不要设置这两个环境变量。
 
 ## 调用示例
 

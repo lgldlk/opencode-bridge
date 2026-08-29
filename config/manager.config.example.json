@@ -1,6 +1,10 @@
 {
   "adminKey": "replace-with-a-long-random-admin-key",
   "apiKey": "replace-with-a-long-random-client-key",
+  "routing": {
+    "strategy": "round_robin",
+    "rateLimitCooldownMs": 3600000
+  },
   "machines": [
     {
       "id": "machine-01",
