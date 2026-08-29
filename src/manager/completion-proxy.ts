@@ -2,7 +2,7 @@
 
 const { Readable } = require("node:stream");
 const { once } = require("node:events");
-const { json, sseHeaders } = require("../shared/http.ts");
+const { json, sseHeaders, sseHeartbeat } = require("../shared/http.ts");
 
 function retryableStatus(status) {
   return status === 502 || status === 503 || status === 504;
@@ -87,9 +87,13 @@ function completionProxy({ registry, requestTimeoutMs }) {
     let closed = false;
     let activeController = null;
     let upstreamDone = false;
+    const heartbeatFrame = sseHeartbeat("manager-keep-alive");
+    // Send a full transport frame immediately, before waiting on the machine.
+    // This is an SSE comment, so it never changes the model response.
+    res.write(heartbeatFrame);
     const heartbeat = setInterval(() => {
-      if (!closed && !res.writableEnded) res.write(": manager-keep-alive\n\n");
-    }, 5_000);
+      if (!closed && !res.writableEnded) res.write(heartbeatFrame);
+    }, 3_000);
     heartbeat.unref?.();
     const onClose = () => {
       closed = true;

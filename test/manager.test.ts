@@ -154,6 +154,10 @@ test("manager sends SSE headers and heartbeats before a slow machine responds", 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let output = "";
+  const first = await reader.read();
+  output += decoder.decode(first.value, { stream: true });
+  assert.match(output, /: manager-keep-alive/);
+  assert.ok(Buffer.byteLength(output) >= 2 * 1024);
   const deadline = Date.now() + 12_000;
   while (!output.includes("[DONE]") && Date.now() < deadline) {
     const next = await reader.read();

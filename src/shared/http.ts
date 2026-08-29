@@ -1,6 +1,7 @@
 "use strict";
 
 const DEFAULT_MAX_BODY = 16 * 1024 * 1024;
+const SSE_HEARTBEAT_MIN_BYTES = 2 * 1024;
 
 function httpError(message, status, data = undefined) {
   return Object.assign(new Error(message), { status, data });
@@ -46,8 +47,16 @@ function sseHeaders() {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     connection: "keep-alive",
+    "content-encoding": "identity",
     "x-accel-buffering": "no",
   };
 }
 
-module.exports = { DEFAULT_MAX_BODY, httpError, json, readJsonBody, sseHeaders };
+// SSE comments are ignored by OpenAI-compatible clients. Pad them so a proxy
+// that buffers small chunks still flushes a live response to the client.
+function sseHeartbeat(name) {
+  const prefix = `: ${name}`;
+  return `${prefix}${" ".repeat(Math.max(0, SSE_HEARTBEAT_MIN_BYTES - Buffer.byteLength(prefix) - 2))}\n\n`;
+}
+
+module.exports = { DEFAULT_MAX_BODY, httpError, json, readJsonBody, sseHeaders, sseHeartbeat };

@@ -1,7 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { json, sseHeaders } = require("../shared/http.ts");
+const { json, sseHeaders, sseHeartbeat } = require("../shared/http.ts");
 const { completion, extractText, promptText, selectModel } = require("./models.ts");
 
 function createChatHandler({ client, directory, defaultModel }) {
@@ -44,9 +44,11 @@ function createChatHandler({ client, directory, defaultModel }) {
 
     res.writeHead(200, sseHeaders());
     res.flushHeaders?.();
+    const heartbeatFrame = sseHeartbeat("machine-keep-alive");
+    res.write(heartbeatFrame);
     const heartbeat = setInterval(() => {
-      if (!res.writableEnded) res.write(": keep-alive\n\n");
-    }, 5_000);
+      if (!res.writableEnded) res.write(heartbeatFrame);
+    }, 3_000);
     const eventController = new AbortController();
     let sessionId = "";
     let sentRole = false;
