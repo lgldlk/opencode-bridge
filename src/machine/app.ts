@@ -18,6 +18,8 @@ function machineConfig(env = process.env) {
     defaultModel: (env.DEFAULT_MODEL || "").trim(),
     directory: env.OPENCODE_DIRECTORY || "/root",
     requestTimeoutMs: Number(env.OPENCODE_REQUEST_TIMEOUT_MS || 60 * 60 * 1000),
+    firstDataTimeoutMs: Number(env.OPENCODE_FIRST_DATA_TIMEOUT_MS || 900_000),
+    eventConnectTimeoutMs: Number(env.OPENCODE_EVENT_CONNECT_TIMEOUT_MS || 15_000),
   };
 }
 
@@ -30,7 +32,13 @@ function createMachineApp(config = machineConfig()) {
     directory: config.directory,
     requestTimeoutMs: config.requestTimeoutMs,
   });
-  const chat = createChatHandler({ client, directory: config.directory, defaultModel: config.defaultModel });
+  const chat = createChatHandler({
+    client,
+    directory: config.directory,
+    defaultModel: config.defaultModel,
+    firstDataTimeoutMs: config.firstDataTimeoutMs,
+    eventConnectTimeoutMs: config.eventConnectTimeoutMs,
+  });
 
   async function route(req, res) {
     if (!hasValidToken(req, config.bridgeKey)) {
@@ -50,7 +58,11 @@ function createMachineApp(config = machineConfig()) {
       } catch (error) {
         console.error(error);
         return json(res, error.status || 502, {
-          error: { message: error.data?.message || error.message, type: "upstream_error", details: error.data },
+          error: {
+            message: error.data?.message || error.message,
+            type: error.data?.type || "upstream_error",
+            details: error.data,
+          },
         });
       }
     }
@@ -63,6 +75,16 @@ function createMachineApp(config = machineConfig()) {
 function start(config = machineConfig()) {
   const app = createMachineApp(config);
   const server = http.createServer((req, res) => routeSafe(app, req, res));
+  // A completion response is an SSE stream and may remain open while the
+  // upstream model is thinking. Do not let Node's defaults terminate it.
+  server.requestTimeout = 0;
+  server.headersTimeout = 0;
+  server.timeout = 0;
+  server.keepAliveTimeout = 75_000;
+  server.on("connection", (socket) => {
+    socket.setNoDelay(true);
+    socket.setKeepAlive(true, 15_000);
+  });
   const close = () => server.close(() => process.exit(0));
   process.once("SIGTERM", close);
   process.once("SIGINT", close);

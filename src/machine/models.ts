@@ -46,7 +46,17 @@ function promptText(messages) {
     const content = Array.isArray(message.content)
       ? message.content.map((part) => typeof part === "string" ? part : (part.text || "")).join("\n")
       : String(message.content ?? "");
-    return `${role.toUpperCase()}: ${content}`;
+    const toolCalls = Array.isArray(message.tool_calls)
+      ? message.tool_calls.map((call) => {
+        const name = call?.function?.name || call?.name || "unknown";
+        const args = call?.function?.arguments ?? call?.arguments ?? "{}";
+        return `${name}(${typeof args === "string" ? args : JSON.stringify(args)})`;
+      }).join("\n")
+      : "";
+    if (role === "tool") {
+      return `TOOL RESULT${message.name ? ` ${message.name}` : ""}${message.tool_call_id ? ` [${message.tool_call_id}]` : ""}:\n${content}`;
+    }
+    return `${role.toUpperCase()}:${toolCalls ? `\nTOOL CALLS:\n${toolCalls}` : ""}${content ? `\n${content}` : ""}`;
   }).join("\n\n");
 }
 

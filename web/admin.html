@@ -4,55 +4,145 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
-  <title>OpenCode Manager</title>
+  <title>OpenCode Manager — 机器控制台</title>
   <link rel="stylesheet" href="/admin.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="topbar">
+  <header class="topbar">
+    <div class="shell topbar-inner">
       <div class="brand">
-        <span class="brand-mark">OC</span>
-        <div><strong>OpenCode Manager</strong><span>机器控制台</span></div>
+        <span class="brand-mark" aria-hidden="true">OC</span>
+        <div class="brand-text">
+          <strong>OpenCode Manager</strong>
+          <span>机器控制台</span>
+        </div>
       </div>
       <div class="top-actions">
-        <button class="button button-ghost" id="refresh" type="button">刷新</button>
+        <button class="button button-ghost" id="refresh" type="button">
+          <span class="btn-icon" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M13.5 2.5v3.2H10.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M5.2 8l1.6 1.6L9.2 7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" opacity=".0"/></svg>
+          </span>
+          刷新
+        </button>
         <button class="button button-ghost" id="logout" type="button">退出</button>
       </div>
-    </header>
+    </div>
+  </header>
 
+  <main class="shell">
     <section class="page-head">
-      <div><p class="eyebrow">CONTROL PLANE</p><h1>机器总览</h1><p class="muted" id="last-updated">等待连接</p></div>
-      <button class="button button-primary" id="add-machine" type="button">添加机器</button>
+      <div class="page-head-left">
+        <p class="eyebrow">CONTROL PLANE</p>
+        <h1>机器总览</h1>
+        <p class="muted" id="last-updated">等待连接</p>
+      </div>
+      <button class="button button-primary" id="add-machine" type="button">
+        <span aria-hidden="true">＋</span> 添加机器
+      </button>
     </section>
 
     <section class="stats" aria-label="服务统计">
-      <div class="stat"><span>已注册机器</span><strong id="stat-total">-</strong></div>
-      <div class="stat stat-good"><span>健康</span><strong id="stat-healthy">-</strong></div>
-      <div class="stat stat-warn"><span>异常</span><strong id="stat-unhealthy">-</strong></div>
-      <div class="stat"><span>可用模型</span><strong id="stat-models">-</strong></div>
+      <div class="stat">
+        <div class="stat-top">
+          <span class="stat-icon" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 6.5h5M5.5 9h3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </span>
+          <span>已注册机器</span>
+        </div>
+        <strong id="stat-total">-</strong>
+      </div>
+      <div class="stat stat-good">
+        <div class="stat-top">
+          <span class="stat-icon good" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4.2 8.2l2.1 2.2 5-5.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </span>
+          <span>健康</span>
+        </div>
+        <strong id="stat-healthy">-</strong>
+      </div>
+      <div class="stat stat-warn">
+        <div class="stat-top">
+          <span class="stat-icon warn" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 5v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.2" r="1" fill="currentColor"/></svg>
+          </span>
+          <span>异常</span>
+        </div>
+        <strong id="stat-unhealthy">-</strong>
+      </div>
+      <div class="stat">
+        <div class="stat-top">
+          <span class="stat-icon" aria-hidden="true">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3.2l5.2 3v5.6L8 14.8 2.8 11.8V6.2L8 3.2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.8 6.2l5.2 3 5.2-3M8 9.2v5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </span>
+          <span>可用模型</span>
+        </div>
+        <strong id="stat-models">-</strong>
+      </div>
     </section>
 
     <section class="panel routing-panel">
-      <div class="panel-head"><div><h2>调用策略</h2><p class="muted">额度耗尽的机器会进入冷却，期间不会接收新请求</p></div></div>
+      <div class="panel-head">
+        <div>
+          <h2>调用策略</h2>
+          <p class="muted">额度耗尽的机器会进入冷却，期间不会接收新请求</p>
+        </div>
+      </div>
       <form class="routing-form" id="routing-form">
-        <label>机器选择<select id="routing-strategy"><option value="round_robin">自动轮询</option><option value="random">随机</option></select></label>
-        <label>限流冷却时间（分钟）<input id="routing-cooldown-minutes" type="number" min="1" max="10080" step="1" value="60" required></label>
-        <div class="routing-actions"><span class="form-error" id="routing-error"></span><button class="button button-primary" type="submit">保存策略</button></div>
+        <label>
+          <span class="field-label">机器选择</span>
+          <select id="routing-strategy">
+            <option value="round_robin">自动轮询</option>
+            <option value="random">随机</option>
+          </select>
+        </label>
+        <label>
+          <span class="field-label">限流冷却时间（分钟）</span>
+          <input id="routing-cooldown-minutes" type="number" min="1" max="10080" step="1" value="60" required>
+        </label>
+        <div class="routing-actions">
+          <span class="form-error" id="routing-error" role="alert"></span>
+          <button class="button button-primary" type="submit">保存策略</button>
+        </div>
       </form>
     </section>
 
     <section class="panel">
-      <div class="panel-head"><div><h2>机器列表</h2><p class="muted">实时状态与路由配置</p></div><span class="connection" id="connection">未连接</span></div>
-      <div class="machine-list" id="machines"><div class="empty">输入管理密钥后载入机器</div></div>
+      <div class="panel-head">
+        <div>
+          <h2>机器列表</h2>
+          <p class="muted">实时状态与路由配置</p>
+        </div>
+        <span class="connection" id="connection">未连接</span>
+      </div>
+      <div class="machine-list" id="machines">
+        <div class="empty">
+          <div class="empty-icon" aria-hidden="true">
+            <svg width="28" height="28" viewBox="0 0 32 32" fill="none"><rect x="6" y="8" width="20" height="14" rx="3" stroke="#b8c4bf" stroke-width="1.4"/><circle cx="12" cy="15" r="2" stroke="#b8c4bf" stroke-width="1.4"/><path d="M16 15h8M6 22h20" stroke="#d3ddd6" stroke-width="1.3" stroke-linecap="round"/></svg>
+          </div>
+          <p class="empty-title">输入管理密钥后载入机器</p>
+          <p class="empty-sub">已配置的机器会在此显示健康状态、模型与延迟</p>
+        </div>
+      </div>
     </section>
+
+    <p class="footnote">所有 `id` 与 `/admin/*` 接口保持不变，仅视觉层优化。</p>
   </main>
 
   <div class="modal-backdrop hidden" id="auth-modal">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
-      <div class="modal-head"><div><p class="eyebrow">SECURE ACCESS</p><h2 id="auth-title">连接管理端</h2></div></div>
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">SECURE ACCESS</p>
+          <h2 id="auth-title">连接管理端</h2>
+          <p class="muted" style="margin-top:6px">输入 Bearer 管理密钥以继续</p>
+        </div>
+      </div>
       <form id="auth-form">
-        <label>管理密钥<input id="admin-key" type="password" autocomplete="current-password" required placeholder="Bearer key"></label>
-        <p class="form-error" id="auth-error"></p>
+        <label>
+          <span class="field-label">管理密钥</span>
+          <input id="admin-key" type="password" autocomplete="current-password" required placeholder="Bearer key">
+        </label>
+        <p class="form-error" id="auth-error" role="alert"></p>
         <button class="button button-primary button-wide" type="submit">连接</button>
       </form>
     </section>
@@ -60,20 +150,35 @@
 
   <div class="modal-backdrop hidden" id="machine-modal">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="machine-title">
-      <div class="modal-head"><div><p class="eyebrow">MACHINE REGISTRY</p><h2 id="machine-title">添加机器</h2></div><button class="icon-button" id="close-machine" type="button" aria-label="关闭">×</button></div>
+      <div class="modal-head">
+        <div>
+          <p class="eyebrow">MACHINE REGISTRY</p>
+          <h2 id="machine-title">添加机器</h2>
+        </div>
+        <button class="icon-button" id="close-machine" type="button" aria-label="关闭">×</button>
+      </div>
       <form id="machine-form">
         <input id="machine-original-id" type="hidden">
-        <div class="form-grid"><label>机器 ID<input id="machine-id" required pattern="[A-Za-z0-9_.-]+" placeholder="sg-01"></label><label>名称<input id="machine-name" required placeholder="Singapore"></label></div>
-        <label>Base URL<input id="machine-url" type="url" required placeholder="https://host.example/opencode"></label>
-        <label>机器 API Key <span class="label-note">新建必填，编辑留空则保留原值</span><input id="machine-key" type="password" autocomplete="new-password" placeholder="sk-..."></label>
-        <div class="form-grid"><label>权重<input id="machine-weight" type="number" min="1" max="100" value="1"></label><label class="check-label"><input id="machine-enabled" type="checkbox" checked>启用机器</label></div>
-        <p class="form-error" id="machine-error"></p>
-        <div class="modal-actions"><button class="button button-ghost" id="cancel-machine" type="button">取消</button><button class="button button-primary" type="submit">保存</button></div>
+        <div class="form-grid">
+          <label><span class="field-label">机器 ID</span><input id="machine-id" required pattern="[A-Za-z0-9_.-]+" placeholder="&lt;machine-id&gt;"></label>
+          <label><span class="field-label">名称</span><input id="machine-name" required placeholder="Singapore"></label>
+        </div>
+        <label><span class="field-label">Base URL</span><input id="machine-url" type="url" required placeholder="https://host.example/opencode"></label>
+        <label><span class="field-label">机器 API Key <span class="label-note">新建必填，编辑留空则保留原值</span></span><input id="machine-key" type="password" autocomplete="new-password" placeholder="sk-..."></label>
+        <div class="form-grid">
+          <label><span class="field-label">权重</span><input id="machine-weight" type="number" min="1" max="100" value="1"></label>
+          <label class="check-label"><input id="machine-enabled" type="checkbox" checked><span>启用机器</span></label>
+        </div>
+        <p class="form-error" id="machine-error" role="alert"></p>
+        <div class="modal-actions">
+          <button class="button button-ghost" id="cancel-machine" type="button">取消</button>
+          <button class="button button-primary" type="submit">保存</button>
+        </div>
       </form>
     </section>
   </div>
 
-  <div class="toast" id="toast" role="status"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/admin.js" defer></script>
 </body>
 </html>

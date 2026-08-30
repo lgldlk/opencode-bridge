@@ -1,0 +1,26 @@
+# Replace angle-bracket placeholders with private deployment values before use.
+# Keep the manager upstream bound to a private interface and expose only TLS.
+server {
+    listen <public-port>;
+    server_name <manager-host>;
+
+    location / {
+        proxy_pass http://<manager-bind-address>:<manager-port>;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+
+        # SSE must not be buffered or compressed by the reverse proxy.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_request_buffering off;
+        proxy_read_timeout <timeout>;
+        proxy_send_timeout <timeout>;
+        send_timeout <timeout>;
+        gzip off;
+        add_header X-Accel-Buffering no always;
+    }
+}

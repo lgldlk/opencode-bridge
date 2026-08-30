@@ -2,132 +2,88 @@
 
 [中文文档](README.zh-CN.md)
 
-An OpenAI-compatible gateway for self-hosted OpenCode instances. Deploy a
-machine adapter next to each OpenCode server, then optionally run one manager
-that exposes a single endpoint, discovers available models, monitors machine
-health, and routes requests across registered machines.
+OpenCode Bridge is a small OpenAI-compatible gateway for self-hosted OpenCode
+workers. A manager can route requests across multiple machine adapters and
+handle health checks and rate-limit cooldowns.
 
-The streaming path preserves the machine adapter's OpenAI-style SSE bytes. It
-does not generate, modify, or buffer model output.
+## What It Does
 
-This project has two deployment roles:
+- Discovers models from each OpenCode worker instead of hard-coding a model.
+- Supports JSON and SSE Chat Completions requests.
+- Routes requests by round-robin or random selection.
+- Places rate-limited workers in a configurable cooldown period.
+- Converts caller-provided tools into client-side `tool_calls`.
+- Keeps file, shell, and edit execution on the calling client. Workers only
+  perform model inference; a failed MCP bridge fails closed with `503`.
+
+## Layout
 
 ```text
-src/machine.ts   machine entry point
-src/manager.ts   manager entry point
-src/machine/     OpenCode client, model mapping, and completion handling
-src/manager/     registry, admin API, and completion routing
-src/shared/      shared HTTP and authentication utilities
-web/             dependency-free browser admin console
-deploy/          idempotent root deployment scripts
-systemd/         service units
-config/          non-secret examples
-test/            Node built-in black-box tests
+src/machine/   machine adapter and OpenCode client
+src/manager/   routing, registry, and admin API
+src/shared/    shared HTTP and auth helpers
+web/            dependency-free admin console
+config/         redacted configuration examples
+deploy/         deployment scripts
+test/           Node test suite
 ```
 
-Runtime requires Node 22.6+ (`--experimental-strip-types`) or Node 24+.
-There are no production npm dependencies.
+Requires Node.js 22.6+ (or Node.js 24+) and does not need production npm
+dependencies.
 
-`src/machine.ts` exposes the OpenAI-compatible subset used by most clients:
+## Quick Start
 
-- `GET /v1/models`
-- `POST /v1/chat/completions` (JSON and SSE-shaped streaming)
-- `GET /health`
-
-The bridge authenticates with `Authorization: Bearer <BRIDGE_KEY>` and talks
-to OpenCode over its local Basic-auth HTTP API. Model ids are discovered from
-OpenCode's `/provider` catalog. If `DEFAULT_MODEL` is empty and a request omits
-`model`, the bridge uses OpenCode's catalog default (with a first-catalog-model
-fallback); it never treats `opencode` as a model name. The systemd units are
-intended to be installed on the OpenCode host; keep the generated env file mode
-600.
-
-## Manager and machine deployment
-
-`src/manager.ts` is an optional control plane. It keeps an explicit machine registry,
-polls `/health` and `/v1/models`, aggregates models, and routes every completion
-with either round-robin or random selection. A machine that returns `429` is put in
-cooldown for one hour by default, so later requests go directly to an eligible
-machine instead of wasting a request on the rate-limited machine. The manager client API uses
-`MANAGER_API_KEY`; registry changes use `MANAGER_ADMIN_KEY`.
-
-Install the machine side as root on each OpenCode host:
+Install a machine adapter beside an OpenCode worker:
 
 ```sh
-BRIDGE_KEY='sk-...' OPENCODE_PASSWORD='...' ./deploy/deploy-machine.sh
+BRIDGE_KEY='replace-me' OPENCODE_PASSWORD='replace-me' ./deploy/deploy-machine.sh
 ```
 
-For a regular user and a non-default bridge port, set deployment variables:
+Install the manager separately:
 
 ```sh
-OPENCODE_RUN_USER=ubuntu PORT=18080 BRIDGE_KEY='sk-...' \
-  OPENCODE_PASSWORD='...' ./deploy/deploy-machine.sh
+MANAGER_ADMIN_KEY='replace-me' MANAGER_API_KEY='replace-me' ./deploy/deploy-manager.sh
 ```
 
-This generates `opencode-<instance>.service`,
-`opencode-bridge-<instance>.service`, and a matching
-`/etc/opencode-bridge-<instance>.env`; an existing env file is never
-overwritten. `OPENCODE_INSTANCE` defaults to the run user, and can preserve a
-machine name used by an existing deployment:
+For SSH-based packaging and deployment, use `deploy/deploy-remote.sh` with a
+host alias from your private SSH configuration.
+
+Register workers through the protected admin API. Use your own private HTTPS
+URL and identifiers; do not commit them:
 
 ```sh
-OPENCODE_INSTANCE=machine-01 OPENCODE_RUN_USER=ubuntu PORT=18080 \
-  BRIDGE_KEY='sk-...' OPENCODE_PASSWORD='...' ./deploy/deploy-machine.sh
+curl -X PUT https://manager.example.invalid/admin/machines/machine-id-placeholder \
+  -H 'Authorization: Bearer <admin-key>' \
+  -H 'content-type: application/json' \
+  -d '{"name":"display-name-placeholder","baseUrl":"https://machine.example.invalid","apiKey":"replace-with-machine-bridge-key"}'
 ```
 
-Install the manager on one host:
+The browser console is served at `/admin`. It stores the admin key only in the
+current browser and sends it to the protected API.
 
-```sh
-MANAGER_ADMIN_KEY='...' MANAGER_API_KEY='...' ./deploy/deploy-manager.sh
-```
+## Client Contract
 
-Register a machine (`baseUrl` is the machine bridge root, without `/v1`):
+Point Pi or another OpenAI-compatible client at the manager HTTPS URL and use
+model IDs returned by `GET /v1/models`. The manager forwards `messages`,
+`tools`, `tool_choice`, assistant `tool_calls`, and tool results without saving
+conversation content.
 
-```sh
-curl -X PUT http://MANAGER:8090/admin/machines/sg-01 \
-  -H 'Authorization: Bearer ADMIN_KEY' -H 'content-type: application/json' \
-  -d '{"name":"machine-01","baseUrl":"https://machine-01.example.internal","apiKey":"sk-..."}'
-```
+When a model proposes `read`, `write`, `edit`, or another caller tool, the
+response is a standard OpenAI `tool_calls` response. The caller executes that
+tool in its own local workspace and sends the result in the next request. The
+bridge never extracts paths from user text and never falls back to remote
+native tools.
 
-The manager exposes the same `GET /v1/models` and `POST /v1/chat/completions`
-paths as a machine, plus `GET /admin/machines` and per-machine `check`,
-`enable`, and `disable` actions. `GET`/`PUT /admin/routing` configures
-`strategy` (`round_robin` or `random`) and `rateLimitCooldownMs`. The same settings
-are available in the browser console. The persistent default is 3,600,000 ms.
-
-`MANAGER_ROUTING_STRATEGY` and `MANAGER_RATE_LIMIT_COOLDOWN_MS` are optional
-environment hard overrides; leave them unset to allow changes from the console to
-take effect.
-
-The browser console is available at `http://MANAGER:8090/admin`. It does not
-embed credentials: enter `MANAGER_ADMIN_KEY` in the login prompt. The key is
-kept only in that browser's local storage and is sent to the existing protected
-admin API for list, check, enable/disable, and create/edit operations.
-
-Operational commands:
+## Development
 
 ```sh
 npm test
-npm run start:machine
-npm run start:manager
+npm run typecheck
 ```
 
-The manager stores its registry in `/etc/opencode-manager.json` with mode 600.
-Keep the manager API behind TLS or a private network; both manager keys and
-machine bridge keys are bearer secrets and should be rotated independently.
+Keep real keys, hostnames, machine IDs, URLs, local paths, and deployment
+settings outside Git. Use the files under `config/` only as templates.
 
-Example request:
+## License
 
-```sh
-curl http://HOST:8080/v1/chat/completions \
-  -H 'Authorization: Bearer sk-...' \
-  -H 'content-type: application/json' \
-  -d '{"messages":[{"role":"user","content":"hello"}]}'
-```
-
-To select a specific model, use an id returned by `/v1/models`, such as
-`provider/model`.
-
-Long-running requests are configured for up to 60 minutes by default. The
-machine adapter uses `OPENCODE_REQUEST_TIMEOUT_MS`; the manager uses
-`MANAGER_REQUEST_TIMEOUT_MS`. Keep these aligned with the client timeout.
+[MIT](LICENSE)

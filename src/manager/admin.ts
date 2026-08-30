@@ -77,6 +77,7 @@ function createAdminRouter({ registry, adminKey, webDir }) {
       next.name = input.name || next.name || id;
       next.baseUrl = input.baseUrl;
       if (input.apiKey !== undefined) next.apiKey = input.apiKey;
+      delete next.executor;
       next.enabled = input.enabled !== false;
       next.weight = Number(input.weight || next.weight || 1);
       if (!machine) registry.config.machines.push(next);

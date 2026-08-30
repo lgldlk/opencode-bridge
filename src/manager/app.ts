@@ -17,6 +17,8 @@ function managerConfig(env = process.env) {
     clientKey: env.MANAGER_API_KEY || "",
     requestTimeoutMs: Number(env.MANAGER_REQUEST_TIMEOUT_MS || 15 * 60 * 1000),
     upstreamConnectTimeoutMs: Number(env.MANAGER_UPSTREAM_CONNECT_TIMEOUT_MS || 12_000),
+    firstDataTimeoutMs: Number(env.MANAGER_FIRST_DATA_TIMEOUT_MS || 900_000),
+    idleDataTimeoutMs: Number(env.MANAGER_IDLE_DATA_TIMEOUT_MS || 900_000),
     healthIntervalMs: Number(env.MANAGER_HEALTH_INTERVAL_MS || 30_000),
     routingStrategy: env.MANAGER_ROUTING_STRATEGY || undefined,
     rateLimitCooldownMs: env.MANAGER_RATE_LIMIT_COOLDOWN_MS || undefined,
@@ -31,6 +33,8 @@ function createManagerApp(config = managerConfig()) {
     registry,
     requestTimeoutMs: config.requestTimeoutMs,
     upstreamConnectTimeoutMs: config.upstreamConnectTimeoutMs,
+    firstDataTimeoutMs: config.firstDataTimeoutMs,
+    idleDataTimeoutMs: config.idleDataTimeoutMs,
   });
 
   function clientAuthorized(req) {
@@ -71,6 +75,16 @@ function createManagerApp(config = managerConfig()) {
 
 function start(config = managerConfig()) {
   const app = createManagerApp(config);
+  // Persist the normalized registry so legacy `executor` fields disappear
+  // without requiring users to edit every registered machine.
+  try {
+    app.registry.saveSync();
+  } catch (error) {
+    console.error(`[manager] unable to synchronously persist normalized registry: ${error.message}`);
+  }
+  void app.registry.save().catch((error) => {
+    console.error(`[manager] unable to persist normalized registry: ${error.message}`);
+  });
   for (const machine of app.registry.config.machines) app.registry.check(machine);
   const interval = setInterval(() => {
     app.registry.config.machines
@@ -82,6 +96,7 @@ function start(config = managerConfig()) {
   // Completion streams may legitimately remain open for many minutes.
   server.requestTimeout = 0;
   server.headersTimeout = 0;
+  server.timeout = 0;
   server.keepAliveTimeout = 75_000;
   // Transport-only settings: do not add, buffer, or rewrite SSE model frames.
   server.on("connection", (socket) => {

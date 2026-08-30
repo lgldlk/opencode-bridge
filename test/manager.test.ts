@@ -9,7 +9,7 @@ const { spawn } = require("node:child_process");
 const root = path.resolve(__dirname, "..");
 
 function mockMachine(mode = "ok") {
-  const state = { mode, completionRequests: 0 };
+  const state = { mode, completionRequests: 0, lastInput: null };
   const server = http.createServer(async (req, res) => {
     if (req.headers.authorization !== "Bearer machine-key") return res.writeHead(401).end();
     if (req.url === "/health") return res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
@@ -21,6 +21,12 @@ function mockMachine(mode = "ok") {
       let body = "";
       for await (const chunk of req) body += chunk;
       const input = JSON.parse(body);
+      state.lastInput = input;
+      if (input.stream) {
+        res.writeHead(200, { "content-type": "text/event-stream" });
+        res.write(`data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: "ok" }, finish_reason: null }] })}\n\n`);
+        return res.end("data: [DONE]\n\n");
+      }
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: input.model, choices: [{ message: { role: "assistant", content: "ok" } }] }));
     }
     res.writeHead(404).end();
@@ -31,7 +37,7 @@ function mockMachine(mode = "ok") {
 function startManager(configPath, port) {
   const child = spawn(process.execPath, ["--experimental-strip-types", path.join(root, "src/manager.ts")], {
     cwd: root,
-    env: { ...process.env, MANAGER_CONFIG: configPath, MANAGER_PORT: String(port), MANAGER_ADMIN_KEY: "admin-key", MANAGER_API_KEY: "client-key", MANAGER_HEALTH_INTERVAL_MS: "60000" },
+    env: { ...process.env, MANAGER_CONFIG: configPath, MANAGER_PORT: String(port), MANAGER_ADMIN_KEY: "admin-key", MANAGER_API_KEY: "client-key", MANAGER_HEALTH_INTERVAL_MS: "60000", MANAGER_FIRST_DATA_TIMEOUT_MS: "250", MANAGER_IDLE_DATA_TIMEOUT_MS: "250" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   return new Promise((resolve, reject) => {
@@ -156,7 +162,8 @@ test("manager sends SSE headers and heartbeats before a slow machine responds", 
   let output = "";
   const first = await reader.read();
   output += decoder.decode(first.value, { stream: true });
-  assert.match(output, /: manager-keep-alive/);
+  assert.match(output, /data: \{"id":"sse-manager-keep-alive"/);
+  assert.match(output, /"choices":\[\{"index":0,"delta":\{\},"finish_reason":null\}\]/);
   assert.ok(Buffer.byteLength(output) >= 2 * 1024);
   const deadline = Date.now() + 12_000;
   while (!output.includes("[DONE]") && Date.now() < deadline) {
@@ -166,5 +173,143 @@ test("manager sends SSE headers and heartbeats before a slow machine responds", 
   }
   assert.match(output, /data: .*ok/);
   assert.match(output, /data: \[DONE\]/);
-  assert.match(output, /: manager-keep-alive/);
+  assert.match(output, /data: \{"id":"sse-manager-keep-alive"/);
+});
+
+test("manager fails over when a machine sends only heartbeats", async (t) => {
+  const stalled = http.createServer(async (req, res) => {
+    if (req.headers.authorization !== "Bearer machine-key") return res.writeHead(401).end();
+    if (req.url === "/health") return res.writeHead(200).end('{"ok":true}');
+    if (req.url === "/v1/models") return res.writeHead(200).end('{"data":[{"id":"opencode/test"}]}');
+    if (req.url === "/v1/chat/completions") {
+      for await (const _chunk of req) { /* consume request */ }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const heartbeat = JSON.stringify({ id: "sse-stalled-keep-alive", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: null }] });
+      const timer = setInterval(() => res.write(`data: ${heartbeat}${" ".repeat(2048)}\n\n`), 50);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      clearInterval(timer);
+      res.end();
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const healthy = await mockMachine("ok");
+  await Promise.all([new Promise((resolve) => stalled.listen(0, "127.0.0.1", resolve))]);
+  const stalledUrl = `http://127.0.0.1:${stalled.address().port}`;
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-timeout-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "stalled", baseUrl: stalledUrl, apiKey: "machine-key" },
+    { id: "healthy", baseUrl: healthy.url, apiKey: "machine-key" },
+  ] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await Promise.all([new Promise((resolve) => stalled.close(resolve)), new Promise((resolve) => healthy.server.close(resolve))]);
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const response = await fetch(`http://127.0.0.1:${managerPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({ model: "opencode/test", stream: true, messages: [{ role: "user", content: "hi" }] }),
+  });
+  const output = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(output, /data: \[DONE\]/);
+  assert.match(output, /data: .*ok/);
+});
+
+test("manager suppresses a pre-model upstream error and fails over", async (t) => {
+  const failed = http.createServer(async (req, res) => {
+    if (req.headers.authorization !== "Bearer machine-key") return res.writeHead(401).end();
+    if (req.url === "/health") return res.writeHead(200).end('{"ok":true}');
+    if (req.url === "/v1/models") return res.writeHead(200).end('{"data":[{"id":"opencode/test"}]}');
+    if (req.url === "/v1/chat/completions") {
+      for await (const _chunk of req) { /* consume request */ }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"error":{"message":"backend timed out","type":"upstream_error"}}\n\n');
+      res.end("data: [DONE]\n\n");
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const healthy = await mockMachine("ok");
+  await new Promise((resolve) => failed.listen(0, "127.0.0.1", resolve));
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-error-failover-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "failed", baseUrl: `http://127.0.0.1:${failed.address().port}`, apiKey: "machine-key" },
+    { id: "healthy", baseUrl: healthy.url, apiKey: "machine-key" },
+  ] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await Promise.all([new Promise((resolve) => failed.close(resolve)), new Promise((resolve) => healthy.server.close(resolve))]);
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const response = await fetch(`http://127.0.0.1:${managerPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({ model: "opencode/test", stream: true, messages: [{ role: "user", content: "hi" }] }),
+  });
+  const output = await response.text();
+  assert.equal(response.status, 200);
+  assert.doesNotMatch(output, /backend timed out/);
+  assert.match(output, /data: .*ok/);
+  assert.match(output, /data: \[DONE\]/);
+});
+
+test("manager forwards the complete local-tool conversation to a registered machine", async (t) => {
+  const machine = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-tool-mode-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "machine", baseUrl: machine.url, apiKey: "machine-key", executor: "opencode" },
+  ] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await new Promise((resolve) => machine.server.close(resolve));
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const tools = [{
+    type: "function",
+    function: {
+      name: "read",
+      description: "Read a local file",
+      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    },
+  }];
+  const messages = [
+    { role: "user", content: "inspect the project" },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call-1", type: "function", function: { name: "read", arguments: '{"path":"README.md"}' } }],
+    },
+    { role: "tool", tool_call_id: "call-1", name: "read", content: "local file contents" },
+  ];
+  const response = await fetch(`http://127.0.0.1:${managerPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opencode/big-pickle",
+      stream: false,
+      messages,
+      tools,
+      tool_choice: "auto",
+    }),
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(machine.state.lastInput.tools, tools);
+  assert.deepEqual(machine.state.lastInput.messages, messages);
+  assert.equal(machine.state.lastInput.tool_choice, "auto");
+  assert.equal(machine.state.lastInput.tool_execution, undefined);
+
+  const persisted = JSON.parse(await fs.promises.readFile(configPath, "utf8"));
+  assert.equal(persisted.machines[0].executor, undefined);
 });

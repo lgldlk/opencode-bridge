@@ -6,3 +6,5 @@ node_modules/
 *.env.local
 .pi-glla/
 .DS_Store
+# Local operations notes may contain private hosts, ports, and credentials.
+OPERATIONS.local.md

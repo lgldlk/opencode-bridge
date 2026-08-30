@@ -22,6 +22,7 @@ function loadConfig(configPath) {
   try {
     const value = JSON.parse(fs.readFileSync(configPath, "utf8"));
     if (!Array.isArray(value.machines)) value.machines = [];
+    value.machines = value.machines.map(({ executor: _legacyExecutor, ...machine }) => machine);
     return value;
   } catch (error) {
     if (error.code === "ENOENT") return { machines: [] };
@@ -82,7 +83,8 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
   }
 
   function machineUrl(machine, requestPath) {
-    return `${String(machine.baseUrl).replace(/\/$/, "")}${requestPath}`;
+    const base = String(machine.baseUrl).replace(/\/$/, "");
+    return `${base}${requestPath}`;
   }
 
   async function fetchMachine(machine, requestPath, options: any = {}, timeoutMs = requestTimeoutMs) {
@@ -185,6 +187,13 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
     await fs.promises.rename(temp, configPath);
   }
 
+  function saveSync() {
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    const temp = `${configPath}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(temp, configPath);
+  }
+
   function find(id) {
     return config.machines.find((machine) => machine.id === id);
   }
@@ -207,6 +216,7 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
     publicMachine,
     remove,
     save,
+    saveSync,
     stateFor,
     isCoolingDown,
     routing,
