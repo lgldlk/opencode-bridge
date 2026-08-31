@@ -27,7 +27,7 @@ function mockMachine(mode = "ok") {
         res.write(`data: ${JSON.stringify({ id: "chatcmpl-test", choices: [{ delta: { content: "ok" }, finish_reason: null }] })}\n\n`);
         return res.end("data: [DONE]\n\n");
       }
-      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: input.model, choices: [{ message: { role: "assistant", content: "ok" } }] }));
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ model: input.model, choices: [{ message: { role: "assistant", content: "ok" } }], usage: { prompt_tokens: 4, completion_tokens: 6, total_tokens: 10 } }));
     }
     res.writeHead(404).end();
   });
@@ -50,6 +50,39 @@ function startManager(configPath, port) {
     child.once("error", reject);
   });
 }
+
+test("manager keeps using one machine until quota failover is triggered", async (t) => {
+  const first = await mockMachine("ok");
+  const second = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-quota-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "first", baseUrl: first.url, apiKey: "machine-key" },
+    { id: "second", baseUrl: second.url, apiKey: "machine-key" },
+  ] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  // Select the quota strategy through the admin API so this also covers the
+  // public configuration path used by the web console.
+  await fetch(`http://127.0.0.1:${managerPort}/admin/routing`, { method: "PUT", headers: { authorization: "Bearer admin-key", "content-type": "application/json" }, body: JSON.stringify({ strategy: "quota_failover", rateLimitCooldownMs: 60_000 }) });
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await Promise.all([new Promise((resolve) => first.server.close(resolve)), new Promise((resolve) => second.server.close(resolve))]);
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const request = () => fetch(`http://127.0.0.1:${managerPort}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "quota" }] }) });
+  assert.equal((await request()).status, 200);
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 2);
+  assert.equal(second.state.completionRequests, 0);
+  first.state.mode = "rate";
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 3);
+  assert.equal(second.state.completionRequests, 1);
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 3);
+  assert.equal(second.state.completionRequests, 2);
+});
 
 async function freePort() {
   const server = http.createServer().listen(0, "127.0.0.1");
@@ -312,4 +345,78 @@ test("manager forwards the complete local-tool conversation to a registered mach
 
   const persisted = JSON.parse(await fs.promises.readFile(configPath, "utf8"));
   assert.equal(persisted.machines[0].executor, undefined);
+});
+
+test("manager exposes persisted per-machine token usage", async (t) => {
+  const machine = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-usage-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [{ id: "usage-machine", baseUrl: machine.url, apiKey: "machine-key" }] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await new Promise((resolve) => machine.server.close(resolve));
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const base = `http://127.0.0.1:${managerPort}`;
+  const response = await fetch(`${base}/v1/chat/completions`, { method: "POST", headers: { authorization: "Bearer client-key", "content-type": "application/json" }, body: JSON.stringify({ model: "opencode/test", messages: [{ role: "user", content: "usage" }] }) });
+  assert.equal(response.status, 200);
+  const usage = await fetch(`${base}/admin/usage?days=7`, { headers: { authorization: "Bearer admin-key" } }).then((r) => r.json());
+  assert.equal(usage.totalTokens, 10);
+  assert.equal(usage.machines[0].totalTokens, 10);
+  assert.equal(usage.machines[0].daily[0].totalTokens, 10);
+  assert.equal(usage.machines[0].byModel["opencode/test"].requests, 1);
+  const requests = await fetch(`${base}/admin/requests?days=7&limit=10`, { headers: { authorization: "Bearer admin-key" } }).then((r) => r.json());
+  assert.equal(requests.total, 1);
+  assert.equal(requests.data[0].status, "success");
+  assert.equal(requests.data[0].totalTokens, 10);
+});
+
+test("manager records usage from an internal streaming usage frame without forwarding it", async (t) => {
+  const machine = http.createServer(async (req, res) => {
+    if (req.headers.authorization !== "Bearer machine-key") return res.writeHead(401).end();
+    if (req.url === "/health") return res.writeHead(200).end('{"ok":true}');
+    if (req.url === "/v1/models") return res.writeHead(200).end('{"data":[{"id":"opencode/test"}]}');
+    if (req.url === "/v1/chat/completions") {
+      for await (const _chunk of req) { /* consume request */ }
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write('data: {"id":"chatcmpl-stream","choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\n');
+      res.write('data: {"id":"usage-stream","object":"bridge.usage","usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}\n\n');
+      res.end('data: {"id":"chatcmpl-stream","choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  await new Promise((resolve) => machine.listen(0, "127.0.0.1", resolve));
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-stream-usage-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [{ id: "stream-machine", baseUrl: `http://127.0.0.1:${machine.address().port}`, apiKey: "machine-key" }] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await new Promise((resolve) => machine.close(resolve));
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const response = await fetch(`http://127.0.0.1:${managerPort}/v1/chat/completions`, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({ model: "opencode/test", stream: true, messages: [{ role: "user", content: "stream" }] }),
+  });
+  const output = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(output, /hello/);
+  assert.match(output, /finish_reason":"stop/);
+  assert.doesNotMatch(output, /bridge\.usage/);
+
+  const usage = await fetch(`http://127.0.0.1:${managerPort}/admin/usage?days=7`, { headers: { authorization: "Bearer admin-key" } }).then((r) => r.json());
+  assert.equal(usage.totalTokens, 20);
+  assert.equal(usage.machines[0].totalTokens, 20);
+  const requests = await fetch(`http://127.0.0.1:${managerPort}/admin/requests?days=7`, { headers: { authorization: "Bearer admin-key" } }).then((r) => r.json());
+  assert.equal(requests.total, 1);
+  assert.equal(requests.data[0].stream, true);
+  assert.equal(requests.data[0].inputTokens, 12);
+  assert.equal(requests.data[0].outputTokens, 8);
 });

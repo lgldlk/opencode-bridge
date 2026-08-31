@@ -131,13 +131,13 @@ test("canonical prompt keeps tool history structured without natural-language la
       { role: "tool", tool_call_id: "call-1", name: "read", content: "file contents" },
     ],
   });
-  assert.match(result.text, /Continue the canonical conversation/);
+  assert.doesNotMatch(result.text, /Continue the canonical conversation/);
   assert.doesNotMatch(result.text, /Requested tool read/);
   assert.doesNotMatch(result.text, /Tool read returned/);
   assert.match(result.text, /"role":"assistant"/);
   assert.match(result.text, /"type":"tool_call"/);
   assert.match(result.text, /"type":"tool_result"/);
-  assert.match(result.system, /Return only the assistant's reply content/);
+  assert.equal(result.system, "");
 });
 
 test("machine converts OpenCode tool inputs to Pi-compatible local arguments", () => {
@@ -825,7 +825,7 @@ test("machine prefers OpenCode prompt_async and completes from the event lifecyc
       queueMicrotask(() => {
         emitEvent({ type: "message.part.delta", properties: { sessionID: sessionId, messageID: "user-echo", field: "text", delta: "{\"role\":\"user\",\"content\":\"echo\"}" } });
         emitEvent({ type: "message.updated", properties: { sessionID: sessionId, info: { id: "user-echo", role: "user" } } });
-        emitEvent({ type: "message.updated", properties: { sessionID: sessionId, info: { id: "assistant-1", role: "assistant" } } });
+        emitEvent({ type: "message.updated", properties: { sessionID: sessionId, info: { id: "assistant-1", role: "assistant", tokens: { input: 2, output: 3 } } } });
         emitEvent({ type: "message.part.delta", properties: { sessionID: sessionId, messageID: "assistant-1", partID: "text-1", field: "text", delta: "async ok" } });
         emitEvent({ type: "session.idle", properties: { sessionID: sessionId } });
       });
@@ -856,6 +856,7 @@ test("machine prefers OpenCode prompt_async and completes from the event lifecyc
   assert.equal(response.statusCode, 200);
   assert.doesNotMatch(response.body, /"role":"user"/);
   assert.equal(JSON.parse(response.body).choices[0].message.content, "async ok");
+  assert.deepEqual(JSON.parse(response.body).usage, { prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 });
 });
 
 test("machine does not forward message.part.delta frames without a message id before hydrating the assistant snapshot", async () => {
