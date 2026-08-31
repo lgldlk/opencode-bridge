@@ -2,10 +2,12 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { normalizeTokenUsage } = require("../shared/usage.ts");
+const { createUsageStore } = require("./usage-store.ts");
 
-const ROUTING_STRATEGIES = new Set(["round_robin", "random"]);
+const ROUTING_STRATEGIES = new Set(["round_robin", "random", "quota_failover"]);
 const DEFAULT_ROUTING = Object.freeze({
-  strategy: "round_robin",
+  strategy: "quota_failover",
   rateLimitCooldownMs: 60 * 60 * 1000,
 });
 
@@ -30,10 +32,20 @@ function loadConfig(configPath) {
   }
 }
 
-function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLimitCooldownMs }) {
+function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLimitCooldownMs, usageDbPath }) {
   let config = loadConfig(configPath);
   const state = new Map();
+  const sessionAffinity = new Map();
   let roundRobin = 0;
+  let quotaCursor = 0;
+  const usageStore = createUsageStore({
+    dbPath: usageDbPath || path.join(path.dirname(configPath), "usage.sqlite"),
+    legacyUsage: config.usage,
+  });
+  if (config.usage) {
+    delete config.usage;
+    saveConfigWithoutUsage();
+  }
 
   function routing() {
     const saved = config.routing || {};
@@ -61,9 +73,45 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
         checkedAt: null,
         lastError: null,
         latencyMs: null,
+        usage: usageStore.read(machine.id),
       });
     }
     return state.get(machine.id);
+  }
+
+  function recordUsage(machine, value, model = undefined) {
+    const normalized = normalizeTokenUsage(value);
+    if (!normalized) return null;
+    const total = usageStore.record(machine.id, model, normalized);
+    stateFor(machine).usage = usageStore.read(machine.id);
+    return total;
+  }
+
+  function usageFor(machine) {
+    return usageStore.read(machine.id);
+  }
+
+  function startUsageRequest(machine, model, stream = false) {
+    return usageStore.start(machine.id, model, stream);
+  }
+
+  function finishUsageRequest(requestId, value, status = "success") {
+    return usageStore.finish(requestId, normalizeTokenUsage(value), status);
+  }
+
+  function usageRequests(options = {}) {
+    return usageStore.listRequests(options);
+  }
+
+  function usageSummary(days = 30) {
+    return usageStore.summary(config.machines, days);
+  }
+
+  function saveConfigWithoutUsage() {
+    const temp = `${configPath}.${process.pid}.tmp`;
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(temp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(temp, configPath);
   }
 
   function publicMachine(machine) {
@@ -79,6 +127,7 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
       cooldownRemainingMs: until ? until - Date.now() : 0,
       routingEligible: machine.enabled !== false && !until,
       ...runtime,
+      usage: usageStore.read(machine.id),
     };
   }
 
@@ -133,8 +182,9 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
     }
   }
 
-  function candidates(model) {
-    const enabled = config.machines.filter((machine) => machine.enabled !== false && !isCoolingDown(machine));
+  function candidates(model, sessionKey = undefined) {
+    const allEnabled = config.machines.filter((machine) => machine.enabled !== false);
+    const enabled = allEnabled.filter((machine) => !isCoolingDown(machine));
     const matching = model ? enabled.filter((machine) => {
       const models = stateFor(machine).models;
       return !models.length || models.includes(model);
@@ -143,7 +193,25 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
     const healthy = pool.filter((machine) => stateFor(machine).status === "healthy");
     const usable = healthy.length ? healthy : pool;
     if (!usable.length) return [];
-    if (routing().strategy === "random") {
+    if (routing().strategy === "quota_failover") {
+      // Keep sending requests to one machine until it enters cooldown after a
+      // quota/rate-limit response. The next eligible machine then becomes the
+      // active slot; when the cooldown expires the original slot is preferred
+      // again. This strategy intentionally ignores session affinity so the
+      // quota boundary is shared by all callers.
+      const ordered = allEnabled.filter((machine) => !isCoolingDown(machine));
+      const matchingOrdered = model ? ordered.filter((machine) => {
+        const models = stateFor(machine).models;
+        return !models.length || models.includes(model);
+      }) : ordered;
+      const candidates = matchingOrdered.length ? matchingOrdered : ordered;
+      if (!candidates.length) return [];
+      const preferredId = allEnabled[quotaCursor % allEnabled.length]?.id;
+      const preferredIndex = candidates.findIndex((machine) => machine.id === preferredId);
+      const start = preferredIndex >= 0 ? preferredIndex : 0;
+      return candidates.slice(start).concat(candidates.slice(0, start));
+    }
+    if (routing().strategy === "random" && !sessionKey) {
       const shuffled = [...usable];
       for (let index = shuffled.length - 1; index > 0; index -= 1) {
         const selected = Math.floor(Math.random() * (index + 1));
@@ -151,11 +219,22 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
       }
       return shuffled;
     }
+    if (sessionKey) {
+      const pinnedId = sessionAffinity.get(String(sessionKey));
+      const pinnedIndex = pinnedId ? usable.findIndex((machine) => machine.id === pinnedId) : -1;
+      if (pinnedIndex >= 0) return usable.slice(pinnedIndex).concat(usable.slice(0, pinnedIndex));
+    }
     const start = roundRobin++ % usable.length;
-    return usable.slice(start).concat(usable.slice(0, start));
+    const ordered = usable.slice(start).concat(usable.slice(0, start));
+    if (sessionKey && ordered[0]) sessionAffinity.set(String(sessionKey), ordered[0].id);
+    return ordered;
   }
 
   async function cooldown(machine) {
+    if (routing().strategy === "quota_failover" && config.machines.length) {
+      const index = config.machines.findIndex((item) => item.id === machine.id);
+      if (index >= 0) quotaCursor = (index + 1) % config.machines.length;
+    }
     const until = new Date(Date.now() + routing().rateLimitCooldownMs).toISOString();
     machine.cooldownUntil = until;
     await save();
@@ -177,6 +256,7 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
     };
     if (!next.rateLimitCooldownMs) throw new Error("rateLimitCooldownMs must be a positive integer");
     config.routing = next;
+    if (next.strategy === "quota_failover") quotaCursor = 0;
     return routing();
   }
 
@@ -221,6 +301,13 @@ function createRegistry({ configPath, requestTimeoutMs, routingStrategy, rateLim
     isCoolingDown,
     routing,
     updateRouting,
+    recordUsage,
+    usageFor,
+    usageSummary,
+    startUsageRequest,
+    finishUsageRequest,
+    usageRequests,
+    close: () => usageStore.close(),
   };
 }
 
