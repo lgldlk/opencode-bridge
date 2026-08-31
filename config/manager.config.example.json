@@ -2,7 +2,7 @@
   "adminKey": "replace-with-a-long-random-admin-key",
   "apiKey": "replace-with-a-long-random-client-key",
   "routing": {
-    "strategy": "round_robin",
+    "strategy": "quota_failover",
     "rateLimitCooldownMs": 3600000
   },
   "machines": [

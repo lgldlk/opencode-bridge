@@ -27,6 +27,7 @@ Options:
   --default-model MODEL      Optional provider/model default
   --manager-host HOST        Manager bind host (manager role)
   --manager-port PORT        Manager bind port (manager role)
+  --usage-db PATH            SQLite usage database path (manager role)
   --request-timeout MS       Manager request timeout (manager role)
   --no-restart               Install files without restarting the service
   -h, --help                 Show this help
@@ -59,6 +60,7 @@ opencode_directory=""
 default_model=""
 manager_host=""
 manager_port=""
+usage_db=""
 request_timeout=""
 restart=1
 ssh_options=()
@@ -118,6 +120,11 @@ while [[ $# -gt 0 ]]; do
     --manager-port)
       [[ $# -ge 2 ]] || die "--manager-port requires a value"
       manager_port="$2"
+      shift 2
+      ;;
+    --usage-db)
+      [[ $# -ge 2 ]] || die "--usage-db requires a value"
+      usage_db="$2"
       shift 2
       ;;
     --request-timeout)
@@ -194,6 +201,7 @@ if [[ "$role" == "manager" ]]; then
   remote_env+=("MANAGER_API_KEY=$(shell_quote "$MANAGER_API_KEY")")
   [[ -n "$manager_host" ]] && remote_env+=("MANAGER_HOST=$(shell_quote "$manager_host")")
   [[ -n "$manager_port" ]] && remote_env+=("MANAGER_PORT=$(shell_quote "$manager_port")")
+  [[ -n "$usage_db" ]] && remote_env+=("MANAGER_USAGE_DB=$(shell_quote "$usage_db")")
   [[ -n "$request_timeout" ]] && remote_env+=("MANAGER_REQUEST_TIMEOUT_MS=$(shell_quote "$request_timeout")")
 else
   remote_env+=("BRIDGE_KEY=$(shell_quote "$BRIDGE_KEY")")

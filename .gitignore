@@ -1,4 +1,6 @@
 *.log
+*.sqlite
+*.sqlite-*
 .env
 node_modules/
 *.local.json
