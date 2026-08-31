@@ -38,7 +38,20 @@
   </header>
 
   <main class="shell">
-    <section class="hero">
+    <div class="dashboard-layout">
+      <aside class="tab-sidebar" aria-label="控制台导航">
+        <div class="tab-sidebar-label">MANAGER</div>
+        <nav class="tab-nav" role="tablist" aria-label="控制台页面">
+          <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="overview"><span aria-hidden="true">⌂</span>总览</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="usage"><span aria-hidden="true">◒</span>额度用量</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="requests"><span aria-hidden="true">≡</span>调用记录</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="routing"><span aria-hidden="true">⇄</span>调用策略</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="machines"><span aria-hidden="true">▣</span>机器列表</button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="guide"><span aria-hidden="true">?</span>配置教程</button>
+        </nav>
+      </aside>
+      <div class="dashboard-content">
+    <section class="hero" data-tab="overview">
       <div class="hero-left">
         <div class="pill">
           <span class="pill-dot" aria-hidden="true"><span class="pill-ping"></span><span class="pill-core"></span></span>
@@ -55,7 +68,7 @@
         </div>
         <div class="hero-mesh"></div>
         <div class="hero-stats-mini">
-          <div><span>策略</span><strong id="hero-strategy">自动轮询</strong></div>
+          <div><span>策略</span><strong id="hero-strategy">额度用尽后切换</strong></div>
           <div><span>冷却</span><strong id="hero-cooldown">60m</strong></div>
         </div>
         <div class="hero-bar"><i style="width:62%"></i></div>
@@ -63,7 +76,7 @@
       </div>
     </section>
 
-    <section class="stats" aria-label="服务统计">
+    <section class="stats" aria-label="服务统计" data-tab="overview">
       <article class="stat">
         <div class="stat-top"><span class="stat-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 6.5h5M5.5 9h3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span><span>已注册机器</span></div>
         <strong id="stat-total">-</strong>
@@ -86,7 +99,60 @@
       </article>
     </section>
 
-    <section class="panel routing-panel">
+    <section class="panel usage-panel" data-tab="usage">
+      <div class="panel-head">
+        <div>
+          <div class="panel-eyebrow">TOKEN USAGE</div>
+          <h2>额度用量</h2>
+          <p class="muted">按网桥观测到的上游 usage 统计，不代表官方剩余额度</p>
+        </div>
+        <span class="panel-badge" id="usage-updated">等待数据</span>
+      </div>
+      <div class="usage-summary" aria-label="Token 总量">
+        <div class="usage-card"><span>总 Token</span><strong id="usage-total">-</strong></div>
+        <div class="usage-card"><span>输入 Token</span><strong id="usage-input">-</strong></div>
+        <div class="usage-card"><span>输出 Token</span><strong id="usage-output">-</strong></div>
+        <div class="usage-card"><span>缓存读取</span><strong id="usage-cache-read">-</strong></div>
+        <div class="usage-card"><span>缓存写入</span><strong id="usage-cache-write">-</strong></div>
+        <div class="usage-card"><span>请求数</span><strong id="usage-requests">-</strong></div>
+      </div>
+      <div class="usage-table-wrap">
+        <table class="usage-table">
+          <thead><tr><th>机器</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th><th>最后请求</th></tr></thead>
+          <tbody id="usage-machines"><tr><td colspan="8" class="usage-empty">暂无用量数据</td></tr></tbody>
+        </table>
+      </div>
+      <div class="usage-table-wrap usage-daily-wrap">
+        <div class="usage-subhead"><strong>每日明细</strong><span>最近 30 天，按机器独立统计</span></div>
+        <table class="usage-table">
+          <thead><tr><th>日期</th><th>机器</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
+          <tbody id="usage-daily"><tr><td colspan="8" class="usage-empty">暂无每日数据</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel requests-panel" data-tab="requests">
+      <div class="panel-head">
+        <div>
+          <div class="panel-eyebrow">REQUEST LOG</div>
+          <h2>调用记录</h2>
+          <p class="muted">每次机器尝试一条记录，包含状态和本次 token 消耗</p>
+        </div>
+        <span class="panel-badge" id="requests-meta">最近 30 天</span>
+      </div>
+      <div class="request-summary" aria-label="调用汇总">
+        <div class="request-summary-card"><span>总用量</span><strong id="request-total-usage">0</strong><small>消耗 Token</small></div>
+        <div class="request-summary-card"><span>API 请求</span><strong id="request-total-count">0</strong><small>总请求数</small></div>
+      </div>
+      <div class="usage-table-wrap">
+        <table class="usage-table requests-table">
+          <thead><tr><th>时间</th><th>机器</th><th>模型</th><th>状态</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
+          <tbody id="request-records"><tr><td colspan="9" class="usage-empty">暂无调用记录</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel routing-panel" data-tab="routing">
       <div class="panel-head">
         <div>
           <div class="panel-eyebrow">ROUTING POLICY</div>
@@ -100,6 +166,7 @@
           <select id="routing-strategy">
             <option value="round_robin">自动轮询</option>
             <option value="random">随机</option>
+            <option value="quota_failover">额度用尽后切换</option>
           </select>
         </label>
         <label><span class="field-label">限流冷却时间（分钟）</span>
@@ -112,7 +179,7 @@
       </form>
     </section>
 
-    <section class="panel">
+    <section class="panel" data-tab="machines">
       <div class="panel-head">
         <div>
           <div class="panel-eyebrow">FLEET</div>
@@ -132,7 +199,7 @@
       </div>
     </section>
 
-    <section class="panel guide-panel" id="guide">
+    <section class="panel guide-panel" id="guide" data-tab="guide">
       <div class="panel-head">
         <div>
           <div class="panel-eyebrow">SETUP GUIDE</div>
@@ -166,9 +233,9 @@
           <article class="guide-step">
             <div class="guide-num">04</div>
             <h3>选择调用策略</h3>
-            <p><b>自动轮询</b> 按权重轮流，<b>随机</b> 随机挑可用机。限流冷却默认 <b>60 分钟</b>，期间 429 的机器不接新请求，自动故障转移。</p>
+            <p><b>额度用尽后切换</b> 会持续使用当前机器，收到 429/额度耗尽后才切到下一台；<b>自动轮询</b> 每次请求轮换，<b>随机</b> 随机挑选。限流冷却默认 <b>60 分钟</b>。</p>
             <div class="guide-code"><pre><code>PUT /admin/routing
-{ "strategy": "round_robin", "rateLimitCooldownMs": 3600000 }</code></pre></div>
+{ "strategy": "quota_failover", "rateLimitCooldownMs": 3600000 }</code></pre></div>
           </article>
           <article class="guide-step">
             <div class="guide-num">05</div>
@@ -203,6 +270,8 @@
       </div>
     </section>
 
+      </div>
+    </div>
     <p class="footnote">所有 `id` 与 `/admin/*` 接口保持不变，仅视觉层对齐 Commission 参考 UI。</p>
   </main>
 
