@@ -10,7 +10,7 @@ handle health checks and rate-limit cooldowns.
 
 - Discovers models from each OpenCode worker instead of hard-coding a model.
 - Supports JSON and SSE Chat Completions requests.
-- Routes requests by round-robin or random selection.
+- Routes requests by quota failover by default, with round-robin and random alternatives.
 - Places rate-limited workers in a configurable cooldown period.
 - Converts caller-provided tools into client-side `tool_calls`.
 - Keeps file, shell, and edit execution on the calling client. Workers only
@@ -28,8 +28,8 @@ deploy/         deployment scripts
 test/           Node test suite
 ```
 
-Requires Node.js 22.6+ (or Node.js 24+) and does not need production npm
-dependencies.
+Requires Node.js 22.5+ (or Node.js 24+) and does not need production npm
+dependencies. The manager stores token usage in SQLite.
 
 ## Quick Start
 

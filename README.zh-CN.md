@@ -4,6 +4,7 @@
 
 OpenCode Bridge 是一个 OpenAI 兼容网关。每台 OpenCode 工作节点运行一个
 `machine` 适配器，可选的 `manager` 负责统一入口、多机路由、健康检查和限流冷却。
+路由默认采用“额度用尽后切换”，也支持轮询和随机选择。
 
 ## 功能
 
@@ -27,7 +28,7 @@ deploy/         部署脚本
 test/           Node 测试
 ```
 
-需要 Node.js 22.6+（或 Node.js 24+），生产运行不依赖 npm 包。
+需要 Node.js 22.5+（或 Node.js 24+），生产运行不依赖 npm 包。管理端用内置 SQLite 保存 token 用量。
 
 ## 最小部署
 
@@ -57,6 +58,7 @@ curl -X PUT https://manager.example.invalid/admin/machines/machine-id-placeholde
 ```
 
 管理界面位于 `/admin`。管理密钥只保存在当前浏览器，并用于访问受保护的管理 API。
+管理端的“额度用量”面板通过 `GET /admin/usage?days=30` 查看每台机器累计及每日 token 统计。
 
 ## 调用约定
 
@@ -67,6 +69,10 @@ Pi 或其他 OpenAI 兼容客户端只需要连接 manager 的 HTTPS 地址，�
 模型提出 `read`、`write`、`edit` 等调用方工具时，网桥返回标准 `tool_calls`；调用方
 在自己的本地工作目录执行，然后在下一轮请求发送结果。网桥不会从用户文字提取路径，
 也不会让远程 OpenCode 执行原生工具。
+
+如客户端提供 `x-session-id`（或 `x-conversation-id`），machine 会在 TTL 内复用同一
+个 OpenCode session，只提交本轮新增消息，不保存客户端对话正文。未提供会话标识时，
+使用一次性 session 以避免不同调用之间发生上下文串线。
 
 ## 开发
 
