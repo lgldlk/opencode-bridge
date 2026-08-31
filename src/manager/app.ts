@@ -11,6 +11,9 @@ const { createRegistry } = require("./registry.ts");
 function managerConfig(env = process.env) {
   return {
     configPath: env.MANAGER_CONFIG || "/etc/opencode-manager.json",
+    // The deploy script sets a system-wide path. For local/test runs keep the
+    // database beside MANAGER_CONFIG so no privileged directory is required.
+    usageDbPath: env.MANAGER_USAGE_DB || "",
     host: env.MANAGER_HOST || "0.0.0.0",
     port: Number(env.MANAGER_PORT || 8090),
     adminKey: env.MANAGER_ADMIN_KEY || "",
@@ -103,7 +106,10 @@ function start(config = managerConfig()) {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 15_000);
   });
-  const close = () => server.close(() => process.exit(0));
+  const close = () => server.close(() => {
+    app.registry.close?.();
+    process.exit(0);
+  });
   process.once("SIGTERM", close);
   process.once("SIGINT", close);
   server.listen(config.port, config.host, () => {

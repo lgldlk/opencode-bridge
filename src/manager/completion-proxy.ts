@@ -1,8 +1,8 @@
 "use strict";
 
-const { Readable } = require("node:stream");
 const { once } = require("node:events");
 const { json, sseHeaders, sseDataHeartbeat, SSE_HEARTBEAT_INTERVAL_MS } = require("../shared/http.ts");
+const { normalizeTokenUsage } = require("../shared/usage.ts");
 
 function retryableStatus(status) {
   return status === 502 || status === 503 || status === 504;
@@ -13,10 +13,20 @@ function rateLimitHeaders(registry) {
   return remainingMs ? { "retry-after": String(Math.max(1, Math.ceil(remainingMs / 1000))) } : {};
 }
 
+function requestSessionKey(req, body) {
+  const headers = req?.headers || {};
+  const explicit = headers["x-session-id"] || headers["x-conversation-id"]
+    || headers["x-opencode-session-id"] || body?.session_id || body?.conversation_id
+    || body?.metadata?.session_id || body?.metadata?.conversation_id;
+  if (typeof explicit === "string" && explicit.trim()) return explicit.trim().slice(0, 256);
+  return null;
+}
+
 function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs = 12_000, firstDataTimeoutMs = 900_000, idleDataTimeoutMs = firstDataTimeoutMs }) {
   async function proxy(req, res, body) {
     const model = body.model;
-    const pool = registry.candidates(model);
+    const sessionKey = requestSessionKey(req, body);
+    const pool = registry.candidates(model, sessionKey);
     console.log(`[request] stream=${body.stream === true} model=${model || "<default>"} bytes=${req.headers["content-length"] || "?"} remote=${req.socket.remoteAddress || "?"}`);
     if (!pool.length) {
       const headers = rateLimitHeaders(registry);
@@ -33,14 +43,15 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
     const payload = JSON.stringify(body);
     return body.stream === true
       ? proxyStream(req, res, pool, payload, model)
-      : proxyJson(res, pool, payload);
+      : proxyJson(res, pool, payload, model);
   }
 
-  async function proxyJson(res, pool, payload) {
+  async function proxyJson(res, pool, payload, model) {
     let lastError;
     let rateLimited = null;
     let otherFailure = false;
     for (const machine of pool) {
+      const requestId = registry.startUsageRequest(machine, model, false);
       try {
         const response = await registry.fetchMachine(machine, "/v1/chat/completions", {
           method: "POST",
@@ -50,26 +61,35 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
         if (response.ok) {
           registry.markHealthy(machine);
           res.writeHead(response.status, { "content-type": response.headers.get("content-type") || "application/json" });
-          if (response.body) return Readable.fromWeb(response.body).pipe(res);
-          return res.end();
+          const text = await response.text();
+          let value = null;
+          try {
+            value = text ? JSON.parse(text) : null;
+          } catch { /* preserve non-JSON upstream responses */ }
+          registry.finishUsageRequest(requestId, value?.usage, "success");
+          return res.end(text);
         }
         if (response.status === 429) {
           const text = await response.text();
           let details;
           try { details = text ? JSON.parse(text) : undefined; } catch { details = undefined; }
           rateLimited = details?.error?.message || text || `${machine.id} is rate limited`;
+          registry.finishUsageRequest(requestId, null, "rate_limited");
           await registry.cooldown(machine);
           continue;
         }
         if (!retryableStatus(response.status)) {
+          registry.finishUsageRequest(requestId, null, `http_${response.status}`);
           res.writeHead(response.status, { "content-type": response.headers.get("content-type") || "application/json" });
           return res.end(await response.text());
         }
         await response.body?.cancel();
+        registry.finishUsageRequest(requestId, null, `http_${response.status}`);
         lastError = new Error(`${machine.id} returned ${response.status}`);
         otherFailure = true;
         registry.markFailure(machine, lastError);
       } catch (error) {
+        registry.finishUsageRequest(requestId, null, error?.name === "AbortError" ? "aborted" : "error");
         registry.markFailure(machine, error);
         lastError = error;
         otherFailure = true;
@@ -91,6 +111,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
     try {
       const value = JSON.parse(data);
       const heartbeat = typeof value?.id === "string" && value.id.startsWith("sse-");
+      const internalUsage = value?.object === "bridge.usage";
       const model = !heartbeat && Array.isArray(value?.choices) && value.choices.some((choice) => {
         if (choice?.finish_reason) return true;
         const delta = choice?.delta || {};
@@ -104,7 +125,11 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
         model,
         done: false,
         heartbeat,
+        internalUsage,
+        usage: normalizeTokenUsage(value?.usage),
         error: value?.error?.message ? String(value.error.message) : undefined,
+        errorType: value?.error?.type ? String(value.error.type) : undefined,
+        errorCode: Number.isInteger(Number(value?.error?.code)) ? Number(value.error.code) : undefined,
       };
     } catch {
       return { model: false, done: false, heartbeat: false };
@@ -157,6 +182,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
     try {
       for (const machine of pool) {
         if (closed) return;
+        const requestId = registry.startUsageRequest(machine, model, true);
         activeController = new AbortController();
         const connectTimer = setTimeout(() => activeController?.abort(new Error("upstream response headers timed out")), upstreamConnectTimeoutMs);
         connectTimer.unref?.();
@@ -172,6 +198,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
           if (response.ok) {
             registry.markHealthy(machine);
             if (!response.body) {
+              registry.finishUsageRequest(requestId, null, "empty_response");
               lastError = new Error(`machine ${machine.id} returned an empty response body`);
               otherFailure = true;
               registry.markFailure(machine, lastError);
@@ -182,6 +209,8 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
             let lastModelDataAt = Date.now();
             let machineSeenModelData = false;
             let machineDone = false;
+            let usageRecorded = false;
+            let observedUsage = null;
             let streamTimeout;
             let streamTimedOut = false;
             const timeoutError = () => {
@@ -207,6 +236,17 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
                     const frame = classifySseBlock(block);
                     if (frame.error && !machineSeenModelData) {
                       lastError = new Error(`machine ${machine.id}: ${frame.error}`);
+                      const rateLimitedFrame = frame.errorCode === 429 || frame.errorType === "rate_limit_error";
+                      if (rateLimitedFrame) {
+                        rateLimited = frame.error;
+                        await registry.cooldown(machine);
+                      } else {
+                        otherFailure = true;
+                      }
+                    }
+                    if (frame.usage && !usageRecorded) {
+                      observedUsage = frame.usage;
+                      usageRecorded = true;
                     }
                     if (frame.model) {
                       machineSeenModelData = true;
@@ -218,7 +258,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
                     // real model frame, suppress machine heartbeats, errors,
                     // and [DONE] so a failed backend can be replaced without
                     // prematurely terminating the client's OpenAI stream.
-                    if (!machineSeenModelData || frame.heartbeat) continue;
+                    if (!machineSeenModelData || frame.heartbeat || frame.internalUsage) continue;
                     if (!await writeChunk(Buffer.from(`${block}\n\n`))) break;
                   }
                 }
@@ -229,12 +269,14 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
               reader.releaseLock();
             }
             console.log(`[stream] machine=${machine.id} ended done=${machineDone} modelData=${machineSeenModelData} timedOut=${streamTimedOut} closed=${closed}`);
+            registry.finishUsageRequest(requestId, observedUsage, closed ? "client_closed" : streamTimedOut ? "timeout" : machineSeenModelData ? "success" : rateLimited ? "rate_limited" : "error");
             if (!machineSeenModelData && !closed) {
               lastError ||= new Error(streamTimedOut
                 ? `machine ${machine.id} produced no model data before timeout`
                 : `machine ${machine.id} closed without model data`);
-              otherFailure = true;
-              registry.markFailure(machine, lastError);
+              if (!rateLimited) otherFailure = true;
+              if (rateLimited) registry.markFailure(machine, new Error(rateLimited));
+              else registry.markFailure(machine, lastError);
               continue;
             }
             if (streamTimedOut && machineSeenModelData && !closed) {
@@ -249,6 +291,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
           try { details = text ? JSON.parse(text) : undefined; } catch { details = undefined; }
           const message = details?.error?.message || text || `${machine.id} returned ${response.status}`;
           if (response.status === 429) {
+            registry.finishUsageRequest(requestId, null, "rate_limited");
             rateLimited = message;
             await registry.cooldown(machine);
             continue;
@@ -258,10 +301,12 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
             return finish();
           }
           lastError = new Error(message);
+          registry.finishUsageRequest(requestId, null, `http_${response.status}`);
           otherFailure = true;
           registry.markFailure(machine, lastError);
         } catch (error) {
           clearTimeout(connectTimer);
+          registry.finishUsageRequest(requestId, null, error?.name === "AbortError" ? "aborted" : "error");
           if (closed) return;
           lastError = error;
           otherFailure = true;

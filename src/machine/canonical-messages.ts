@@ -125,15 +125,8 @@ function renderOpenCodePrompt(input: any) {
     role: message.role,
     content: (message.content || []).map(renderPart),
   })).join("\n");
-  const text = [
-    "Continue the canonical conversation below as the assistant. Treat each following line as JSON data, preserve role and tool semantics, and produce the next assistant response after the final item.",
-    transcript,
-  ].join("\n\n");
-  const system = [
-    upstreamSystem,
-    "You are answering through an OpenCode proxy.",
-    "Return only the assistant's reply content.",
-  ].filter(Boolean).join("\n\n");
+  const text = transcript;
+  const system = upstreamSystem;
 
   return {
     system,

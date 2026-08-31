@@ -42,8 +42,8 @@ function createAdminRouter({ registry, adminKey, webDir }) {
       if (req.method === "GET") return json(res, 200, registry.routing());
       if (req.method === "PUT") {
         const input = await readJsonBody(req);
-        if (input.strategy !== undefined && !["round_robin", "random"].includes(input.strategy)) {
-          return json(res, 400, { error: { message: "strategy must be round_robin or random" } });
+        if (input.strategy !== undefined && !["round_robin", "random", "quota_failover"].includes(input.strategy)) {
+          return json(res, 400, { error: { message: "strategy must be round_robin, random, or quota_failover" } });
         }
         if (input.rateLimitCooldownMs !== undefined && (!Number.isFinite(Number(input.rateLimitCooldownMs)) || Number(input.rateLimitCooldownMs) <= 0)) {
           return json(res, 400, { error: { message: "rateLimitCooldownMs must be a positive number" } });
@@ -52,6 +52,22 @@ function createAdminRouter({ registry, adminKey, webDir }) {
         await registry.save();
         return json(res, 200, routing);
       }
+    }
+
+    if (req.method === "GET" && parts[1] === "usage" && !id) {
+      const requestedDays = Number(url.searchParams.get("days") || 30);
+      const days = Number.isFinite(requestedDays) ? Math.min(366, Math.max(1, Math.floor(requestedDays))) : 30;
+      return json(res, 200, registry.usageSummary(days));
+    }
+
+    if (req.method === "GET" && parts[1] === "requests" && !id) {
+      const daysValue = Number(url.searchParams.get("days") || 30);
+      const limitValue = Number(url.searchParams.get("limit") || 100);
+      const offsetValue = Number(url.searchParams.get("offset") || 0);
+      const days = Number.isFinite(daysValue) ? Math.min(366, Math.max(1, Math.floor(daysValue))) : 30;
+      const limit = Number.isFinite(limitValue) ? Math.min(500, Math.max(1, Math.floor(limitValue))) : 100;
+      const offset = Number.isFinite(offsetValue) ? Math.max(0, Math.floor(offsetValue)) : 0;
+      return json(res, 200, registry.usageRequests({ days, limit, offset, machineId: url.searchParams.get("machineId") || "" }));
     }
 
     if (req.method === "GET" && parts[1] === "machines" && !id) {

@@ -1,5 +1,7 @@
 "use strict";
 
+const { toOpenAIUsage } = require("../shared/usage.ts");
+
 function selectModel(catalog, requested = "") {
   if (requested && requested.includes("/")) {
     const slash = requested.indexOf("/");
@@ -67,18 +69,15 @@ function extractText(message) {
     .join("");
 }
 
-function completion(id, model, text, promptTokens = 0, completionTokens = 0) {
+function completion(id, model, text, promptTokens = 0, completionTokens = 0, usage = undefined) {
+  const normalized = usage || { inputTokens: promptTokens, outputTokens: completionTokens, totalTokens: promptTokens + completionTokens };
   return {
     id: `chatcmpl-${id}`,
     object: "chat.completion",
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: "stop" }],
-    usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
-    },
+    usage: toOpenAIUsage(normalized),
   };
 }
 

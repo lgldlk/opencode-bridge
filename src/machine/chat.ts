@@ -6,6 +6,7 @@ const { json, sseHeaders, sseDataHeartbeat, SSE_HEARTBEAT_INTERVAL_MS, httpError
 const { completion, extractText, selectModel } = require("./models.ts");
 const { clientToolContract, sanitizeClientToolArguments, validateClientToolArguments } = require("./tool-contract.ts");
 const { renderOpenCodePrompt } = require("./canonical-messages.ts");
+const { usageFromMessage, toOpenAIUsage } = require("../shared/usage.ts");
 
 const FALLBACK_TOOL_IDS = [
   "invalid", "question", "bash", "read", "glob", "grep", "edit", "write",
@@ -17,6 +18,49 @@ const bridgePool = {
   slots: new Map(),
   initialized: false,
 };
+const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+
+function sessionTtlMs() {
+  const value = Number(process.env.OPENCODE_SESSION_TTL_MS || DEFAULT_SESSION_TTL_MS);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_SESSION_TTL_MS;
+}
+
+function requestSessionKey(req, body) {
+  const headers = req?.headers || {};
+  const explicit = headers["x-session-id"] || headers["x-conversation-id"]
+    || headers["x-opencode-session-id"] || body?.session_id || body?.conversation_id
+    || body?.metadata?.session_id || body?.metadata?.conversation_id;
+  if (typeof explicit === "string" && explicit.trim()) return explicit.trim().slice(0, 256);
+  return null;
+}
+
+// OpenCode stores provider failures on assistant message.info.error rather
+// than always emitting a dedicated session.error event. Normalize that shape
+// so the manager can classify quota/rate-limit failures and fail over.
+function normalizeOpenCodeError(value) {
+  const source = value && typeof value === "object" ? value : {};
+  const data = source.data && typeof source.data === "object" ? source.data : {};
+  let message = source.message || data.message || "";
+  if (!message && typeof data.responseBody === "string") {
+    try {
+      const body = JSON.parse(data.responseBody);
+      message = body?.error?.message || body?.message || "";
+    } catch { /* provider returned a non-JSON body */ }
+  }
+  const status = Number(source.statusCode || source.status || data.statusCode || data.status);
+  const normalizedStatus = Number.isInteger(status) && status > 0 ? status : undefined;
+  const type = normalizedStatus === 429 ? "rate_limit_error" : "upstream_error";
+  return {
+    message: String(message || "OpenCode session failed"),
+    status: normalizedStatus,
+    type,
+    details: {
+      provider: data.metadata?.url ? String(data.metadata.url) : undefined,
+      status: normalizedStatus,
+      retryable: data.isRetryable,
+    },
+  };
+}
 
 function bridgePoolSize() {
   const value = Number(process.env.OPENCODE_TOOL_BRIDGE_POOL_SIZE || 8);
@@ -178,7 +222,7 @@ function sessionPermission(toolMap) {
   ];
 }
 
-function toolCompletion(id, model, calls) {
+function toolCompletion(id, model, calls, usage = undefined) {
   const list = Array.isArray(calls) ? calls : [calls];
   return {
     id: `chatcmpl-${id}`,
@@ -198,6 +242,7 @@ function toolCompletion(id, model, calls) {
       },
       finish_reason: "tool_calls",
     }],
+    ...(usage ? { usage: toOpenAIUsage(usage) } : {}),
   };
 }
 
@@ -208,6 +253,19 @@ function createChatHandler({
   firstDataTimeoutMs = 900_000,
   eventConnectTimeoutMs = 15_000,
 }) {
+  const sessions = new Map();
+
+  function sessionFor(key, model) {
+    if (!key) return null;
+    const current = sessions.get(key);
+    if (!current || current.model !== model || Date.now() - current.lastUsedAt > sessionTtlMs()) {
+      if (current?.id) void client.sessionDelete?.(current.id).catch(() => {});
+      sessions.delete(key);
+      return null;
+    }
+    current.lastUsedAt = Date.now();
+    return current;
+  }
   async function resolveModel(name) {
     const requested = name || defaultModel;
     if (requested.includes("/")) return selectModel(undefined, requested);
@@ -298,13 +356,21 @@ function createChatHandler({
   async function handle(req, res, body) {
     const selected = await resolveModel(body.model);
     const model = selected.name;
+    const sessionKey = requestSessionKey(req, body);
+    const existingSession = sessionFor(sessionKey, model);
     const discoveredTools = await discoveredToolIds();
     const definitions = applyToolChoice(
       clientToolDefinitions(body.tools ?? body.functions),
       body.tool_choice,
     );
     const toolMap = clientToolMap(definitions, discoveredTools);
-    const canonicalPrompt = renderOpenCodePrompt(body.messages || []);
+    const incomingMessages = Array.isArray(body.messages) ? body.messages : [];
+    const messagesForPrompt = existingSession && existingSession.messageCount < incomingMessages.length
+      ? incomingMessages.slice(existingSession.messageCount)
+      : existingSession && existingSession.messageCount === incomingMessages.length
+        ? incomingMessages.slice(-1)
+        : incomingMessages;
+    const canonicalPrompt = renderOpenCodePrompt(messagesForPrompt);
     // Keep the caller's tools available on every request. Tool history is
     // represented in the prompt context; disabling tools based on message
     // shape would break legitimate follow-up tool calls.
@@ -407,6 +473,9 @@ function createChatHandler({
     const startedAt = Date.now();
     let terminalResolve;
     const terminal = new Promise((resolve) => { terminalResolve = resolve; });
+    let errorWatcherPromise = Promise.resolve();
+    let persistentSession = false;
+    let observedUsage = null;
     const asyncLifecycle = typeof client.promptAsync === "function" && typeof client.sessionMessages === "function";
     let asyncTurn = asyncLifecycle;
 
@@ -618,6 +687,15 @@ function createChatHandler({
       if (event.type === "message.updated") {
         const messageId = properties.info?.id;
         const role = properties.info?.role;
+        if (role === "assistant") {
+          // OpenCode commonly puts token accounting on the message.updated
+          // event, while the final /message snapshot may omit it. Keep the
+          // latest non-empty usage from either source.
+          observedUsage = usageFromMessage({ info: properties.info }) || observedUsage;
+        }
+        if (properties.info?.error) {
+          terminalResolve({ error: normalizeOpenCodeError(properties.info.error) });
+        }
         if (messageId && role) {
           messageRoles.set(messageId, role);
           if (role === "assistant") {
@@ -676,7 +754,7 @@ function createChatHandler({
         return;
       }
       if (event.type === "session.error") {
-        terminalResolve({ error: properties.error?.message || "OpenCode session failed" });
+        terminalResolve({ error: normalizeOpenCodeError(properties.error || properties) });
       } else if (event.type === "session.idle") {
         if (clientTools && capturedToolCalls.size === 0) {
           // Some OpenCode/provider combinations publish `session.idle` just
@@ -699,6 +777,21 @@ function createChatHandler({
 
     let heartbeat;
     let firstDataTimer;
+    const sendStreamUsage = (usage) => {
+      if (!body.stream || !usage || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify({
+        id: `usage-${id}`,
+        object: "bridge.usage",
+        usage: {
+          prompt_tokens: usage.inputTokens,
+          completion_tokens: usage.outputTokens,
+          total_tokens: usage.totalTokens,
+          reasoning_tokens: usage.reasoningTokens,
+          cache_read_input_tokens: usage.cacheReadTokens,
+          cache_creation_input_tokens: usage.cacheWriteTokens,
+        },
+      })}\n\n`);
+    };
     const sendStreamTool = (toolCalls) => {
       res.write(`data: ${JSON.stringify({
         id: `chatcmpl-${id}`,
@@ -753,8 +846,43 @@ function createChatHandler({
         clearTimeout(eventReadyTimer);
       }
 
-      const session = await createSession(clientTools && !toolBridge ? sessionPermission(toolMap) : undefined);
+      const session = existingSession
+        || await createSession(clientTools && !toolBridge ? sessionPermission(toolMap) : undefined);
       sessionId = session.id;
+      persistentSession = Boolean(sessionKey);
+      if (persistentSession) {
+        sessions.set(sessionKey, {
+          id: sessionId,
+          model,
+          messageCount: incomingMessages.length,
+          lastUsedAt: Date.now(),
+        });
+      }
+      // Provider errors are persisted on the assistant message, but some
+      // OpenCode releases never publish session.idle/session.error for a
+      // failed provider turn. Poll the lightweight message snapshot so a
+      // quota error is surfaced immediately instead of waiting for a timeout.
+      if (asyncLifecycle) {
+        errorWatcherPromise = (async () => {
+          while (!eventController.signal.aborted) {
+            try {
+              const snapshot = await client.sessionMessages(session.id, eventController.signal);
+              const entries = Array.isArray(snapshot) ? snapshot : (Array.isArray(snapshot?.data) ? snapshot.data : []);
+              const failed = entries.find((entry) => entry?.info?.role === "assistant" && entry.info.error);
+              if (failed?.info?.error) {
+                terminalResolve({ error: normalizeOpenCodeError(failed.info.error) });
+                return;
+              }
+            } catch {
+              if (eventController.signal.aborted) return;
+            }
+            await new Promise((resolve) => {
+              const timer = setTimeout(resolve, 500);
+              timer.unref?.();
+            });
+          }
+        })();
+      }
       if (body.stream) {
         res.writeHead(200, sseHeaders());
         res.flushHeaders?.();
@@ -782,7 +910,14 @@ function createChatHandler({
             eventStream.done.then(() => "event_end"),
           ]);
           if (terminalResult && typeof terminalResult === "object" && terminalResult.error) {
-            throw httpError(terminalResult.error, 502);
+            const normalized = typeof terminalResult.error === "string"
+              ? { message: terminalResult.error, status: undefined, type: "upstream_error", details: undefined }
+              : terminalResult.error;
+            throw httpError(
+              normalized.message,
+              normalized.status || 502,
+              { type: normalized.type, details: normalized.details },
+            );
           }
           if (eventController.signal.aborted && capturedToolCalls.size === 0 && !streamedText && !invalidToolError) {
             throw httpError("OpenCode first model data timed out", 504);
@@ -797,6 +932,13 @@ function createChatHandler({
             message = entries.filter((entry) => entry?.info?.role === "assistant").at(-1)
               || entries.at(-1)
               || null;
+          }
+          if (message?.info?.error) {
+            const normalized = normalizeOpenCodeError(message.info.error);
+            throw httpError(normalized.message, normalized.status || 502, {
+              type: normalized.type,
+              details: normalized.details,
+            });
           }
           for (const callID of pendingToolInputs.keys()) finalizeTool(callID, true);
         } catch (error) {
@@ -818,10 +960,20 @@ function createChatHandler({
       clearTimeout(firstDataTimer);
 
       const toolCalls = [...capturedToolCalls.values()];
+      const turnUsage = usageFromMessage(message) || observedUsage;
       if (toolCalls.length > 0) {
+        if (sessionKey) {
+          const stored = sessions.get(sessionKey);
+          if (stored) {
+            stored.messageCount = incomingMessages.length;
+            stored.lastUsedAt = Date.now();
+          }
+        }
         console.log(`[machine-tools] model=${model} session=${sessionId} tools=${toolCalls.map((call) => call.name).join(",")} events=${eventCount}`);
-        if (body.stream) sendStreamTool(toolCalls);
-        else json(res, 200, toolCompletion(id, model, toolCalls));
+        if (body.stream) {
+          sendStreamUsage(turnUsage);
+          sendStreamTool(toolCalls);
+        } else json(res, 200, toolCompletion(id, model, toolCalls, turnUsage));
         return;
       }
 
@@ -842,19 +994,32 @@ function createChatHandler({
         // emission only after the turn is confirmed not to contain a call.
         sendDelta(pending, { forceEmit: true, skipAccumulate: true });
       }
-      if (body.stream) sendStreamDone();
-      else json(res, 200, completion(id, model, streamedText, message?.info?.tokens?.input || 0, message?.info?.tokens?.output || 0));
+      if (body.stream) {
+        sendStreamUsage(turnUsage);
+        sendStreamDone();
+      }
+      else json(res, 200, completion(id, model, streamedText, turnUsage?.inputTokens || 0, turnUsage?.outputTokens || 0, turnUsage));
+      if (sessionKey) {
+        const stored = sessions.get(sessionKey);
+        if (stored) {
+          stored.messageCount = incomingMessages.length;
+          stored.lastUsedAt = Date.now();
+        }
+      }
     } catch (error) {
       if (error?.name === "AbortError" && capturedToolCalls.size === 0 && !streamedText) error = httpError("OpenCode first model data timed out", 504);
       const message = error?.data?.message || error?.message || "upstream error";
+      const status = Number(error?.status || error?.data?.statusCode);
+      const code = Number.isInteger(status) && status > 0 ? status : undefined;
+      const type = error?.data?.type || (code === 429 ? "rate_limit_error" : "upstream_error");
       console.error(`[machine-stream] model=${model} session=${sessionId || "?"} failed name=${error?.name || "Error"} message=${message}`);
       if (!res.writableEnded) {
         if (body.stream) {
           if (!res.headersSent) res.writeHead(200, sseHeaders());
-          res.write(`data: ${JSON.stringify({ error: { message, type: error.data?.type || "upstream_error", tool: error.data?.tool } })}\n\n`);
+          res.write(`data: ${JSON.stringify({ error: { message, type, code, tool: error.data?.tool } })}\n\n`);
           res.end("data: [DONE]\n\n");
         } else {
-          json(res, error.status || 502, { error: { message, type: error.data?.type || "upstream_error", tool: error.data?.tool } });
+          json(res, code || 502, { error: { message, type, code, tool: error.data?.tool } });
         }
       }
     } finally {
@@ -867,7 +1032,8 @@ function createChatHandler({
       clearTimeout(syncFinalizeTimer);
       clearTimeout(idleSettleTimer);
       await eventStream.done.catch(() => {});
-      if (sessionId && client.sessionDelete) {
+      await errorWatcherPromise.catch(() => {});
+      if (sessionId && client.sessionDelete && !persistentSession) {
         await client.sessionDelete(sessionId).catch(() => {});
       }
       if (toolBridge) {
