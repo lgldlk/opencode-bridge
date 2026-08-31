@@ -4,10 +4,10 @@
   "private": true,
   "description": "OpenCode OpenAI-compatible machine bridge and health-aware manager",
   "type": "commonjs",
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22.5" },
   "scripts": {
     "start:machine": "node --experimental-strip-types src/machine.ts",
-    "start:manager": "node --experimental-strip-types src/manager.ts",
+    "start:manager": "node --experimental-strip-types --experimental-sqlite src/manager.ts",
     "test": "node --experimental-strip-types --test",
     "typecheck": "tsc --noEmit"
   },
