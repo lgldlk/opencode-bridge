@@ -289,9 +289,10 @@ function decodeToolInput(state: ToolState = {}): JsonObject {
 }
 
 function sessionPermission(toolMap) {
+  const names = toolMap instanceof Map ? [...toolMap.keys()] : (Array.isArray(toolMap) ? toolMap : []);
   return [
     { permission: "*", pattern: "*", action: "deny" },
-    ...toolMap.keys().map((name) => ({ permission: name, pattern: "*", action: "ask" })),
+    ...names.map((name) => ({ permission: name, pattern: "*", action: "ask" })),
   ];
 }
 
@@ -406,7 +407,7 @@ function createChatHandler({
     return { current, incomingFingerprints, messages };
   }
 
-  function commitSession(key, sessionId, model, incomingFingerprints, assistantMessage, bridgeName = undefined, systemPrompt = undefined, lastResponse = undefined) {
+  function commitSession(key, sessionId, model, incomingFingerprints, assistantMessage, bridgeName = undefined, systemPrompt = undefined, lastResponse = undefined, bridgeToolIds = undefined) {
     if (!key || !sessionId) return;
     sessions.set(key, {
       id: sessionId,
@@ -414,8 +415,10 @@ function createChatHandler({
       inputFingerprints: incomingFingerprints,
       assistantFingerprint: messageFingerprint(assistantMessage),
       bridgeName,
+      bridgeToolIds: Array.isArray(bridgeToolIds) ? [...new Set(bridgeToolIds)].sort() : undefined,
       systemPrompt: typeof systemPrompt === "string" && systemPrompt ? systemPrompt : undefined,
       lastResponse,
+      toolPermissionVersion: 1,
       lastUsedAt: Date.now(),
     });
     sweepSessions(sessions.size > sessionMaxEntries());
@@ -531,12 +534,12 @@ function createChatHandler({
   async function handleTurn(req, res, body, sessionKey) {
     const selected = await resolveModel(body.model);
     const model = selected.name;
-    const inputPlan = sessionInput(
+    let inputPlan = sessionInput(
       sessionFor(sessionKey, model),
       sessionKey,
       Array.isArray(body.messages) ? body.messages : [],
     );
-    const existingSession = inputPlan.current;
+    let existingSession = inputPlan.current;
     if (inputPlan.replay && existingSession?.lastResponse) {
       const replay = existingSession.lastResponse;
       if (body.stream) {
@@ -601,8 +604,8 @@ function createChatHandler({
     );
     const toolMap = clientToolMap(definitions, discoveredTools);
     const incomingMessages = Array.isArray(body.messages) ? body.messages : [];
-    const messagesForPrompt = inputPlan.messages;
-    const canonicalPrompt = renderOpenCodePrompt(messagesForPrompt);
+    let messagesForPrompt = inputPlan.messages;
+    let canonicalPrompt = renderOpenCodePrompt(messagesForPrompt);
     // Keep the caller's tools available on every request. Tool history is
     // represented in the prompt context; disabling tools based on message
     // shape would break legitimate follow-up tool calls.
@@ -642,6 +645,33 @@ function createChatHandler({
         }
         throw bridgeError;
       }
+    }
+    // Session permissions are fixed when the OpenCode session is created.
+    // Reusing a session after the caller changes its tool set would either
+    // deny the new MCP tool or resurrect a stale tool schema. Start a clean
+    // upstream session and replay the caller's canonical transcript in that
+    // case; never send only the appended turn to a session with mismatched
+    // permissions.
+    const currentBridgeToolIds = toolBridge?.toolIds;
+    const existingBridgeToolIds = existingSession?.bridgeToolIds;
+    const bridgeSetChanged = Boolean(existingSession) && (
+      Boolean(toolBridge) !== Boolean(existingSession.bridgeName)
+      || Boolean(toolBridge && (
+        !Array.isArray(existingBridgeToolIds)
+        || [...existingBridgeToolIds].sort().join("\u0000") !== [...currentBridgeToolIds].sort().join("\u0000")
+      ))
+    );
+    if (bridgeSetChanged) {
+      discardSession(sessionKey, existingSession);
+      existingSession = null;
+      inputPlan = {
+        ...inputPlan,
+        current: null,
+        messages: incomingMessages,
+        replay: false,
+      };
+      messagesForPrompt = incomingMessages;
+      canonicalPrompt = renderOpenCodePrompt(messagesForPrompt);
     }
     // Do not inject tool-specific instructions into the model prompt.  MCP
     // exposes the caller's schemas as ordinary tools; the upstream client
@@ -688,6 +718,9 @@ function createChatHandler({
     // captured client-tool turns that must stop the model.
     let remoteSessionNeedsAbort = false;
     const abortOnClientClose = () => {
+      // `close` is also emitted after a normal response has been fully
+      // written. Do not abort a persistent OpenCode session on that path.
+      if (res?.writableEnded || res?.writableFinished) return;
       if (!eventController.signal.aborted) {
         remoteSessionNeedsAbort = true;
         eventController.abort(Object.assign(new Error("Client connection closed"), { name: "AbortError" }));
@@ -722,9 +755,17 @@ function createChatHandler({
     let observedUsage = null;
     const asyncLifecycle = typeof client.promptAsync === "function" && typeof client.sessionMessages === "function";
     let asyncTurn = asyncLifecycle;
+    let remoteAbortIssued = false;
 
     const finishCapturedToolTurn = (reason) => {
       remoteSessionNeedsAbort = true;
+      if (asyncTurn && sessionId && client.sessionAbort && !remoteAbortIssued) {
+        remoteAbortIssued = true;
+        // Stop the remote agent immediately after the first complete MCP
+        // call. Otherwise a delegated MCP error can make OpenCode dispatch
+        // more tools before the request handler reaches its finalizer.
+        void client.sessionAbort(sessionId).catch(() => {});
+      }
       // The legacy synchronous message endpoint does not return until the
       // remote turn is aborted. The async endpoint already returned after
       // enqueueing the prompt, so aborting here would also cancel the message
@@ -858,6 +899,11 @@ function createChatHandler({
         clientName,
         input: Object.keys(normalizedInput).length > 0 ? normalizedInput : (previous?.input || {}),
       });
+      if (toolBridge && Object.keys(normalizedInput).length > 0) {
+        // The event carries the authoritative arguments. Capture the first
+        // complete delegated call now instead of waiting for step-finish.
+        finalizeTool(part.callID);
+      }
       // OpenCode emits a pending snapshot (`input: {}`) followed by a running
       // snapshot containing the decoded arguments. Keep collecting snapshots;
       // the step-finish event is the authoritative point at which the complete
@@ -881,7 +927,14 @@ function createChatHandler({
     };
     const hydrateToolInputs = (result) => {
       const entries = Array.isArray(result) ? result : (Array.isArray(result?.data) ? result.data : []);
-      for (const entry of entries) {
+      // Only the latest assistant message belongs to this prompt turn.
+      // Scanning the whole persistent session re-hydrates every historical
+      // failed MCP call on every request, which is the source of the
+      // read/bash/echo loop observed in production.
+      const latestAssistant = [...entries]
+        .reverse()
+        .find((entry) => entry?.info?.role === "assistant");
+      for (const entry of latestAssistant ? [latestAssistant] : []) {
         for (const part of Array.isArray(entry?.parts) ? entry.parts : []) {
           if (part?.type !== "tool" || !part.callID) continue;
           const input = decodeToolInput(part.state || {
@@ -1097,7 +1150,7 @@ function createChatHandler({
       }
 
       const session = existingSession
-        || await createSession(clientTools && !toolBridge ? sessionPermission(toolMap) : undefined);
+        || await createSession(clientTools ? sessionPermission(toolBridge ? toolBridge.toolIds : toolMap) : undefined);
       sessionId = session.id;
       if (sessionKey) {
         console.log(
@@ -1203,7 +1256,9 @@ function createChatHandler({
           // tool turn. Depending on OpenCode/provider timing, the event stream
           // can expose only a pending `{}` snapshot (or no tool part at all),
           // while the completed arguments are already available here.
-          const result = await hydrateToolInputsWithRetry(session.id);
+          const result = capturedToolCalls.size > 0 && toolBridge
+            ? null
+            : await hydrateToolInputsWithRetry(session.id);
           const entries = Array.isArray(result) ? result : (Array.isArray(result?.data) ? result.data : []);
           if (invalidToolError) throw invalidToolError;
           if (capturedToolCalls.size === 0 || !clientTools) {
@@ -1249,6 +1304,7 @@ function createChatHandler({
           toolBridge?.name || existingSession?.bridgeName,
           systemPrompt,
           { toolCalls, usage: turnUsage },
+          currentBridgeToolIds,
         );
         persistentSession = Boolean(sessionKey);
         console.log(`[machine-tools] model=${model} session=${sessionId} tools=${toolCalls.map((call) => call.name).join(",")} events=${eventCount}`);
@@ -1290,6 +1346,7 @@ function createChatHandler({
         toolBridge?.name || existingSession?.bridgeName,
         systemPrompt,
         { text: streamedText, usage: turnUsage },
+        currentBridgeToolIds,
       );
       persistentSession = Boolean(sessionKey);
     } catch (error) {
@@ -1314,7 +1371,8 @@ function createChatHandler({
         }
       }
     } finally {
-      if (remoteSessionNeedsAbort && sessionId && client.sessionAbort) {
+      if (remoteSessionNeedsAbort && sessionId && client.sessionAbort && !remoteAbortIssued) {
+        remoteAbortIssued = true;
         await client.sessionAbort(sessionId).catch(() => {});
       }
       eventController.abort();
