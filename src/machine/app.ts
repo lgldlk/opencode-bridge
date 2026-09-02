@@ -1,13 +1,30 @@
 "use strict";
 
 const http = require("node:http");
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { Server, Socket } from "node:net";
 const { hasValidToken } = require("../shared/auth.ts");
 const { json, readJsonBody } = require("../shared/http.ts");
 const { createChatHandler } = require("./chat.ts");
 const { catalogModelIds } = require("./models.ts");
 const { createOpenCodeClient } = require("./opencode-client.ts");
 
-function machineConfig(env = process.env) {
+export interface MachineAppConfig {
+  port: number;
+  host: string;
+  opencodeUrl: string;
+  username: string;
+  password: string;
+  bridgeKey: string;
+  defaultModel: string;
+  directory: string;
+  requestTimeoutMs: number;
+  firstDataTimeoutMs: number;
+  eventConnectTimeoutMs: number;
+}
+interface MachineApplication { route: (req: IncomingMessage, res: ServerResponse) => Promise<unknown>; }
+
+function machineConfig(env: NodeJS.ProcessEnv = process.env): MachineAppConfig {
   return {
     port: Number(env.PORT || 8080),
     host: env.HOST || "0.0.0.0",
@@ -23,7 +40,7 @@ function machineConfig(env = process.env) {
   };
 }
 
-function createMachineApp(config = machineConfig()) {
+function createMachineApp(config: MachineAppConfig = machineConfig()): MachineApplication {
   if (!config.bridgeKey || !config.password) throw new Error("BRIDGE_KEY and OPENCODE_PASSWORD are required");
   const client = createOpenCodeClient({
     url: config.opencodeUrl,
@@ -40,7 +57,7 @@ function createMachineApp(config = machineConfig()) {
     eventConnectTimeoutMs: config.eventConnectTimeoutMs,
   });
 
-  async function route(req, res) {
+  async function route(req: IncomingMessage, res: ServerResponse) {
     if (!hasValidToken(req, config.bridgeKey)) {
       return json(res, 401, { error: { message: "Invalid API key", type: "authentication_error" } });
     }
@@ -49,7 +66,7 @@ function createMachineApp(config = machineConfig()) {
       const ids = catalogModelIds(await client.providers());
       return json(res, 200, {
         object: "list",
-        data: ids.map((id) => ({ id, object: "model", created: Math.floor(Date.now() / 1000), owned_by: "opencode" })),
+        data: ids.map((id: string) => ({ id, object: "model", created: Math.floor(Date.now() / 1000), owned_by: "opencode" })),
       });
     }
     if (req.method === "POST" && (req.url === "/v1/chat/completions" || req.url === "/chat/completions")) {
@@ -72,7 +89,7 @@ function createMachineApp(config = machineConfig()) {
   return { route };
 }
 
-function start(config = machineConfig()) {
+function start(config: MachineAppConfig = machineConfig()): Server {
   const app = createMachineApp(config);
   const server = http.createServer((req, res) => routeSafe(app, req, res));
   // A completion response is an SSE stream and may remain open while the
@@ -81,7 +98,7 @@ function start(config = machineConfig()) {
   server.headersTimeout = 0;
   server.timeout = 0;
   server.keepAliveTimeout = 75_000;
-  server.on("connection", (socket) => {
+  server.on("connection", (socket: Socket) => {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 15_000);
   });
@@ -92,7 +109,7 @@ function start(config = machineConfig()) {
   return server;
 }
 
-async function routeSafe(app, req, res) {
+async function routeSafe(app: MachineApplication, req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     await app.route(req, res);
   } catch (error) {

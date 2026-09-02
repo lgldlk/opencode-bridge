@@ -10,8 +10,29 @@
  * writes, or executes anything in the remote workspace.
  */
 const { Buffer } = require("node:buffer");
+import type { JsonObject } from "../shared/types.ts";
 
-function parseTools(value, onError) {
+interface McpToolDefinition {
+  name?: string;
+  description?: string;
+  parameters?: JsonObject;
+}
+interface StdioOptions {
+  input?: NodeJS.ReadableStream & { setEncoding(encoding: BufferEncoding): void };
+  output?: NodeJS.WritableStream;
+  errorOutput?: NodeJS.WritableStream;
+  onEnd?: () => void;
+  maxFrameBytes?: number;
+}
+type JsonRpcId = string | number | null;
+interface JsonRpcMessage extends JsonObject {
+  jsonrpc?: string;
+  id?: JsonRpcId;
+  method?: string;
+  params?: JsonObject;
+}
+
+function parseTools(value: string | undefined, onError?: (error: unknown) => void): McpToolDefinition[] {
   try {
     const parsed = JSON.parse(value ?? "[]");
     if (Array.isArray(parsed)) return parsed;
@@ -21,22 +42,23 @@ function parseTools(value, onError) {
   return [];
 }
 
-function response(id, result) {
+function response(id: JsonRpcId | undefined, result: JsonObject): JsonObject | null {
   return id === undefined || id === null ? null : { jsonrpc: "2.0", id, result };
 }
 
-function errorResponse(id, code, message) {
+function errorResponse(id: JsonRpcId | undefined, code: number, message: string): JsonObject | null {
   return id === undefined || id === null
     ? null
     : { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-function dispatch(message, tools = []) {
+function dispatch(message: unknown, tools: McpToolDefinition[] = []): JsonObject | null {
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
   }
-  const { id, method, params } = message;
-  if (message.jsonrpc !== "2.0" || typeof method !== "string") {
+  const source = message as JsonRpcMessage;
+  const { id, method, params } = source;
+  if (source.jsonrpc !== "2.0" || typeof method !== "string") {
     return { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } };
   }
   switch (method) {
@@ -60,15 +82,16 @@ function dispatch(message, tools = []) {
         })),
       });
     case "tools/call":
-      return response(id, {
-        content: [{ type: "text", text: "Tool call intercepted by opencode-bridge." }],
-      });
+      // Tool execution belongs to the caller's local runtime. Returning a
+      // successful natural-language result here would pollute the OpenCode
+      // session and make the model believe the remote machine executed it.
+      return errorResponse(id, -32001, "Tool execution is delegated to the client");
     default:
       return errorResponse(id, -32601, `Method not found: ${method}`);
   }
 }
 
-function runStdioServer(tools, options: any = {}) {
+function runStdioServer(tools: McpToolDefinition[], options: StdioOptions = {}) {
   const input = options.input ?? process.stdin;
   const output = options.output ?? process.stdout;
   const errorOutput = options.errorOutput ?? process.stderr;
@@ -78,9 +101,9 @@ function runStdioServer(tools, options: any = {}) {
     ? configuredMax
     : 1024 * 1024;
 
-  const send = (message) => output.write(`${JSON.stringify(message)}\n`);
-  const sendError = (code, message) => send({ jsonrpc: "2.0", id: null, error: { code, message } });
-  const processFrame = (frame) => {
+  const send = (message: JsonObject) => output.write(`${JSON.stringify(message)}\n`);
+  const sendError = (code: number, message: string) => send({ jsonrpc: "2.0", id: null, error: { code, message } });
+  const processFrame = (frame: string) => {
     const line = frame.trim();
     if (!line) return;
     let message;
@@ -99,7 +122,7 @@ function runStdioServer(tools, options: any = {}) {
   let bufferBytes = 0;
   let oversized = false;
   input.setEncoding("utf8");
-  input.on("data", (chunk) => {
+  input.on("data", (chunk: string) => {
     let start = 0;
     for (let newlineIndex; (newlineIndex = chunk.indexOf("\n", start)) !== -1; start = newlineIndex + 1) {
       const part = chunk.slice(start, newlineIndex);

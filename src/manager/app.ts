@@ -1,14 +1,17 @@
 "use strict";
 
 const http = require("node:http");
+import type { IncomingMessage, ServerResponse } from "node:http";
 const path = require("node:path");
 const { hasValidToken } = require("../shared/auth.ts");
 const { json, readJsonBody } = require("../shared/http.ts");
 const { createAdminRouter } = require("./admin.ts");
 const { completionProxy } = require("./completion-proxy.ts");
 const { createRegistry } = require("./registry.ts");
+import type { ManagerConfig } from "../shared/types.ts";
+import type { Server, Socket } from "node:net";
 
-function managerConfig(env = process.env) {
+function managerConfig(env: NodeJS.ProcessEnv = process.env): ManagerConfig {
   return {
     configPath: env.MANAGER_CONFIG || "/etc/opencode-manager.json",
     // The deploy script sets a system-wide path. For local/test runs keep the
@@ -23,13 +26,20 @@ function managerConfig(env = process.env) {
     firstDataTimeoutMs: Number(env.MANAGER_FIRST_DATA_TIMEOUT_MS || 900_000),
     idleDataTimeoutMs: Number(env.MANAGER_IDLE_DATA_TIMEOUT_MS || 900_000),
     healthIntervalMs: Number(env.MANAGER_HEALTH_INTERVAL_MS || 30_000),
-    routingStrategy: env.MANAGER_ROUTING_STRATEGY || undefined,
+    sessionAffinityTtlMs: Number(env.MANAGER_SESSION_AFFINITY_TTL_MS || 60 * 60 * 1000),
+    sessionAffinityMaxEntries: Number(env.MANAGER_SESSION_AFFINITY_MAX_ENTRIES || 10_000),
+    routingStrategy: (env.MANAGER_ROUTING_STRATEGY as ManagerConfig["routingStrategy"]) || undefined,
     rateLimitCooldownMs: env.MANAGER_RATE_LIMIT_COOLDOWN_MS || undefined,
     webDir: path.join(__dirname, "../../web"),
   };
 }
 
-function createManagerApp(config = managerConfig()) {
+interface ManagerApplication {
+  registry: ReturnType<typeof createRegistry>;
+  route: (req: IncomingMessage, res: ServerResponse) => Promise<unknown>;
+}
+
+function createManagerApp(config: ManagerConfig = managerConfig()): ManagerApplication {
   const registry = createRegistry(config);
   const admin = createAdminRouter({ registry, adminKey: config.adminKey, webDir: config.webDir });
   const completions = completionProxy({
@@ -44,7 +54,7 @@ function createManagerApp(config = managerConfig()) {
     return hasValidToken(req, config.clientKey || registry.config.apiKey || registry.config.adminKey || "");
   }
 
-  async function route(req, res) {
+  async function route(req: IncomingMessage, res: ServerResponse) {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
     if (req.method === "GET" && (url.pathname === "/admin" || url.pathname === "/admin/")) return admin.serveAsset(res, "html");
     if (req.method === "GET" && url.pathname === "/admin.css") return admin.serveAsset(res, "css");
@@ -64,7 +74,7 @@ function createManagerApp(config = managerConfig()) {
       const unknown = registry.config.machines.filter((machine) => machine.enabled !== false && registry.stateFor(machine).status === "unknown");
       if (unknown.length) await Promise.all(unknown.map((machine) => registry.check(machine)));
       const ids = [...new Set(registry.config.machines.flatMap((machine) => registry.stateFor(machine).models))];
-      return json(res, 200, { object: "list", data: ids.map((id) => ({ id, object: "model", created: Math.floor(Date.now() / 1000), owned_by: "opencode-manager" })) });
+      return json(res, 200, { object: "list", data: ids.map((id: string) => ({ id, object: "model", created: Math.floor(Date.now() / 1000), owned_by: "opencode-manager" })) });
     }
     if (req.method === "POST" && url.pathname === "/v1/chat/completions") {
       if (!clientAuthorized(req)) return json(res, 401, { error: { message: "Invalid manager API key", type: "authentication_error" } });
@@ -76,7 +86,7 @@ function createManagerApp(config = managerConfig()) {
   return { registry, route };
 }
 
-function start(config = managerConfig()) {
+function start(config: ManagerConfig = managerConfig()): Server {
   const app = createManagerApp(config);
   // Persist the normalized registry so legacy `executor` fields disappear
   // without requiring users to edit every registered machine.
@@ -102,7 +112,7 @@ function start(config = managerConfig()) {
   server.timeout = 0;
   server.keepAliveTimeout = 75_000;
   // Transport-only settings: do not add, buffer, or rewrite SSE model frames.
-  server.on("connection", (socket) => {
+  server.on("connection", (socket: Socket) => {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 15_000);
   });
@@ -119,7 +129,7 @@ function start(config = managerConfig()) {
   return server;
 }
 
-async function routeSafe(app, req, res) {
+async function routeSafe(app: ManagerApplication, req: IncomingMessage, res: ServerResponse): Promise<void> {
   try {
     await app.route(req, res);
   } catch (error) {

@@ -4,19 +4,34 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { hasValidToken } = require("../shared/auth.ts");
 const { json, readJsonBody } = require("../shared/http.ts");
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { MachineConfig, MachinePublicView, RoutingConfig, UsageRequestPage, UsageSummary } from "../shared/types.ts";
 
 const ASSETS = {
   html: { file: "admin.html", contentType: "text/html; charset=utf-8" },
   css: { file: "admin.css", contentType: "text/css; charset=utf-8" },
   js: { file: "admin.js", contentType: "text/javascript; charset=utf-8" },
 };
+type AssetName = keyof typeof ASSETS;
+interface AdminRegistry {
+  config: { adminKey?: string; apiKey?: string; machines: MachineConfig[] };
+  find: (id: string) => MachineConfig | undefined;
+  routing: () => RoutingConfig;
+  updateRouting: (value: Record<string, unknown>) => RoutingConfig;
+  save: () => Promise<void>;
+  usageSummary: (days: number) => UsageSummary;
+  usageRequests: (options: Record<string, unknown>) => UsageRequestPage;
+  publicMachine: (machine: MachineConfig) => MachinePublicView;
+  check: (machine: MachineConfig) => Promise<boolean>;
+  remove: (id: string) => void;
+}
 
-function createAdminRouter({ registry, adminKey, webDir }) {
-  function authorized(req) {
+function createAdminRouter({ registry, adminKey, webDir }: { registry: AdminRegistry; adminKey: string; webDir: string }) {
+  function authorized(req: IncomingMessage): boolean {
     return hasValidToken(req, adminKey || registry.config.adminKey || "", "x-admin-key");
   }
 
-  async function serveAsset(res, asset) {
+  async function serveAsset(res: ServerResponse, asset: AssetName): Promise<unknown> {
     const target = ASSETS[asset];
     if (!target) return json(res, 404, { error: { message: "Not found" } });
     try {
@@ -32,7 +47,7 @@ function createAdminRouter({ registry, adminKey, webDir }) {
     }
   }
 
-  async function route(req, res, url) {
+  async function route(req: IncomingMessage, res: ServerResponse, url: URL): Promise<unknown> {
     if (!authorized(req)) return json(res, 401, { error: { message: "Invalid manager key", type: "authentication_error" } });
     const parts = url.pathname.split("/").filter(Boolean);
     const id = parts[2];
@@ -89,7 +104,7 @@ function createAdminRouter({ registry, adminKey, webDir }) {
       if (!input.baseUrl || !/^https?:\/\//.test(input.baseUrl)) {
         return json(res, 400, { error: { message: "baseUrl must be an http(s) URL" } });
       }
-      const next = machine || { id };
+      const next: MachineConfig = machine || { id, baseUrl: "", apiKey: "" };
       next.name = input.name || next.name || id;
       next.baseUrl = input.baseUrl;
       if (input.apiKey !== undefined) next.apiKey = input.apiKey;

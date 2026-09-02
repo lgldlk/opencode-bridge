@@ -1,11 +1,25 @@
 "use strict";
 
-function schemaFor(definition) {
+import type { JsonObject } from "../shared/types.ts";
+
+interface ToolSchema {
+  type?: string;
+  required?: unknown;
+  properties?: unknown;
+  [key: string]: unknown;
+}
+interface ToolDefinition {
+  parameters?: unknown;
+  description?: unknown;
+}
+interface ValidationOptions { strict?: boolean; [key: string]: unknown; }
+
+function schemaFor(definition: ToolDefinition | undefined): ToolSchema {
   const schema = definition?.parameters;
-  return schema && typeof schema === "object" && !Array.isArray(schema) ? schema : {};
+  return schema && typeof schema === "object" && !Array.isArray(schema) ? schema as ToolSchema : {};
 }
 
-function requiredFields(name, definition) {
+function requiredFields(_name: string, definition: ToolDefinition | undefined): string[] {
   const schema = schemaFor(definition);
   if (Array.isArray(schema.required)) {
     return schema.required.filter((field) => typeof field === "string" && field.length > 0);
@@ -13,11 +27,11 @@ function requiredFields(name, definition) {
   return [];
 }
 
-function hasValue(value) {
+function hasValue(value: unknown): boolean {
   return value !== undefined && value !== null && (!(typeof value === "string") || value.trim().length > 0);
 }
 
-function matchesType(value, type) {
+function matchesType(value: unknown, type: string | undefined): boolean {
   if (!type) return true;
   if (type === "string") return typeof value === "string";
   if (type === "number" || type === "integer") return typeof value === "number" && Number.isFinite(value);
@@ -27,8 +41,8 @@ function matchesType(value, type) {
   return true;
 }
 
-function validateClientToolArguments(name, args, definition, options: any = {}) {
-  const value = args && typeof args === "object" && !Array.isArray(args) ? args : null;
+function validateClientToolArguments(name: string, args: unknown, definition: ToolDefinition | undefined, _options: ValidationOptions = {}) {
+  const value = args && typeof args === "object" && !Array.isArray(args) ? args as JsonObject : null;
   if (!value) return { ok: false, message: `${name} arguments must be a JSON object` };
 
   const schema = schemaFor(definition);
@@ -36,7 +50,9 @@ function validateClientToolArguments(name, args, definition, options: any = {}) 
     if (!hasValue(value[field])) return { ok: false, message: `${name} requires argument "${field}"` };
   }
 
-  const properties: Record<string, any> = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+  const properties: Record<string, ToolSchema> = schema.properties && typeof schema.properties === "object"
+    ? schema.properties as Record<string, ToolSchema>
+    : {};
   for (const [field, fieldSchema] of Object.entries(properties)) {
     if (!hasValue(value[field]) || !fieldSchema || typeof fieldSchema !== "object") continue;
     if (!matchesType(value[field], fieldSchema.type)) {
@@ -47,7 +63,7 @@ function validateClientToolArguments(name, args, definition, options: any = {}) 
   return { ok: true, value };
 }
 
-function sanitizeClientToolArguments(name, args, definition, options = {}) {
+function sanitizeClientToolArguments(name: string, args: unknown, definition: ToolDefinition | undefined, options: ValidationOptions = {}) {
   const result = validateClientToolArguments(name, args, definition, options);
   return result.ok
     ? result
@@ -60,7 +76,7 @@ function sanitizeClientToolArguments(name, args, definition, options = {}) {
     };
 }
 
-function clientToolContract(definitions, toolMap) {
+function clientToolContract(definitions: Map<string, ToolDefinition>, toolMap: Map<string, string>) {
   return [...toolMap.entries()].map(([openCodeName, clientName]) => {
     const definition = definitions.get(clientName);
     const schema = schemaFor(definition);

@@ -1,8 +1,9 @@
 "use strict";
 
 const { toOpenAIUsage } = require("../shared/usage.ts");
+import type { OpenCodeProviderCatalog, OpenCodeProvider, OpenAIMessage, TokenUsage, SelectedModel } from "../shared/types.ts";
 
-function selectModel(catalog, requested = "") {
+function selectModel(catalog: OpenCodeProviderCatalog, requested = ""): SelectedModel {
   if (requested && requested.includes("/")) {
     const slash = requested.indexOf("/");
     return {
@@ -35,18 +36,22 @@ function selectModel(catalog, requested = "") {
   throw Object.assign(new Error("OpenCode provider catalog has no models"), { status: 503 });
 }
 
-function catalogModelIds(catalog) {
+function catalogModelIds(catalog: OpenCodeProviderCatalog): string[] {
   const connected = new Set(catalog.connected || []);
   return (catalog.all || [])
     .filter((provider) => connected.size === 0 || connected.has(provider.id))
     .flatMap((provider) => Object.keys(provider.models || {}).map((id) => `${provider.id}/${id}`));
 }
 
-function promptText(messages) {
-  return (messages || []).map((message) => {
+function promptText(messages: OpenAIMessage[] = []): string {
+  return messages.map((message: OpenAIMessage) => {
     const role = message.role || "user";
     const content = Array.isArray(message.content)
-      ? message.content.map((part) => typeof part === "string" ? part : (part.text || "")).join("\n")
+      ? message.content.map((part) => typeof part === "string"
+        ? part
+        : part && typeof part === "object" && !Array.isArray(part) && "text" in part
+          ? String((part as Record<string, unknown>).text || "")
+          : "").join("\n")
       : String(message.content ?? "");
     const toolCalls = Array.isArray(message.tool_calls)
       ? message.tool_calls.map((call) => {
@@ -62,15 +67,22 @@ function promptText(messages) {
   }).join("\n\n");
 }
 
-function extractText(message) {
+function extractText(message: { parts?: Array<{ type?: string; text?: string }> } | null | undefined): string {
   return (message?.parts || [])
     .filter((part) => part && part.type === "text")
     .map((part) => part.text || "")
     .join("");
 }
 
-function completion(id, model, text, promptTokens = 0, completionTokens = 0, usage = undefined) {
-  const normalized = usage || { inputTokens: promptTokens, outputTokens: completionTokens, totalTokens: promptTokens + completionTokens };
+function completion(id: string, model: string, text: string, promptTokens = 0, completionTokens = 0, usage?: TokenUsage) {
+  const normalized = usage || {
+    inputTokens: promptTokens,
+    outputTokens: completionTokens,
+    reasoningTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: promptTokens + completionTokens,
+  };
   return {
     id: `chatcmpl-${id}`,
     object: "chat.completion",
