@@ -189,7 +189,11 @@ tar \
   -czf "$archive" -C "$repo_dir" .
 
 printf 'Uploading release to %s...\n' "$target" >&2
-scp "${ssh_options[@]}" "$archive" "$target:$remote_archive"
+if [[ ${#ssh_options[@]} -gt 0 ]]; then
+  scp "${ssh_options[@]}" "$archive" "$target:$remote_archive"
+else
+  scp "$archive" "$target:$remote_archive"
+fi
 
 shell_quote() {
   printf '%q' "$1"
@@ -255,5 +259,9 @@ else
 fi
 
 printf 'Installing %s on %s...\n' "$role" "$target" >&2
-ssh "${ssh_options[@]}" "$target" "bash -s" <<< "$remote_script"
+if [[ ${#ssh_options[@]} -gt 0 ]]; then
+  ssh "${ssh_options[@]}" "$target" "bash -s" <<< "$remote_script"
+else
+  ssh "$target" "bash -s" <<< "$remote_script"
+fi
 printf 'Deployment complete: %s on %s\n' "$role" "$target" >&2

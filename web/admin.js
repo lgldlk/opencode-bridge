@@ -6,6 +6,7 @@
   let routing = { strategy: "quota_failover", rateLimitCooldownMs: 60 * 60 * 1000 };
   let usage = { requests: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, machines: [] };
   let requestRecords = { data: [], total: 0 };
+  const requestPage = { limit: 50, offset: 0 };
   let toastTimer;
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;", "'":"&#039;"}[char]));
@@ -56,6 +57,9 @@
     $("usage-output").textContent = formatNumber(usage.outputTokens);
     $("usage-cache-read").textContent = formatNumber(usage.cacheReadTokens);
     $("usage-cache-write").textContent = formatNumber(usage.cacheWriteTokens);
+    const cacheBase = (Number(usage.inputTokens) || 0) + (Number(usage.cacheReadTokens) || 0);
+    const cacheRate = cacheBase > 0 ? ((Number(usage.cacheReadTokens) || 0) / cacheBase) * 100 : 0;
+    $("usage-cache-rate").textContent = `${cacheRate.toFixed(1)}%`;
     $("usage-requests").textContent = formatNumber(usage.requests);
     $("usage-updated").textContent = usage.machines?.length ? `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour12: false })}` : "暂无数据";
     const rows = (usage.machines || []).filter((machine) => machine.requests > 0);
@@ -66,12 +70,24 @@
   }
 
   function renderRequests() {
-    $("requests-meta").textContent = `最近 30 天 · ${formatNumber(requestRecords.total)} 条`;
+    const total = Number(requestRecords.total) || 0;
+    const limit = Number(requestRecords.limit) || requestPage.limit;
+    const offset = Number(requestRecords.offset) || requestPage.offset;
+    const count = (requestRecords.data || []).length;
+    const start = total ? offset + 1 : 0;
+    const end = total ? Math.min(offset + count, total) : 0;
+    $("requests-meta").textContent = `最近 30 天 · ${formatNumber(total)} 条`;
     $("request-total-usage").textContent = formatNumber(usage.totalTokens);
     $("request-total-count").textContent = formatNumber(usage.requests || requestRecords.total);
     const rows = requestRecords.data || [];
     const status = { started: "进行中", success: "成功", rate_limited: "限流", timeout: "超时", aborted: "中断", error: "失败", empty_response: "空响应" };
-    $("request-records").innerHTML = rows.length ? rows.map((item) => `<tr><td>${escapeHtml(formatTime(item.requestedAt))}</td><td>${escapeHtml(item.machineId)}</td><td>${escapeHtml(item.model || "—")}</td><td><span class="request-status ${escapeHtml(item.status)}">${escapeHtml(status[item.status] || item.status)}</span></td><td>${formatNumber(item.inputTokens)}</td><td>${formatNumber(item.outputTokens)}</td><td>${formatNumber(item.cacheReadTokens)}</td><td>${formatNumber(item.cacheWriteTokens)}</td><td>${formatNumber(item.totalTokens)}</td></tr>`).join("") : '<tr><td colspan="9" class="usage-empty">暂无调用记录</td></tr>';
+    const cell = (label, value, className = "") => `<td${className ? ` class="${className}"` : ""} data-label="${label}">${value}</td>`;
+    $("request-records").innerHTML = rows.length ? rows.map((item) => `<tr>${cell("时间", escapeHtml(formatTime(item.requestedAt)), "request-time")}${cell("机器", escapeHtml(item.machineId))}${cell("模型", escapeHtml(item.model || "—"), "request-model")}${cell("状态", `<span class="request-status ${escapeHtml(item.status)}">${escapeHtml(status[item.status] || item.status)}</span>`, "request-state")}${cell("输入", formatNumber(item.inputTokens))}${cell("输出", formatNumber(item.outputTokens))}${cell("缓存读", formatNumber(item.cacheReadTokens))}${cell("缓存写", formatNumber(item.cacheWriteTokens))}${cell("总 Token", formatNumber(item.totalTokens), "request-total")}</tr>`).join("") : '<tr><td colspan="9" class="usage-empty">暂无调用记录</td></tr>';
+    $("requests-page-info").textContent = `显示 ${formatNumber(start)}–${formatNumber(end)} / 共 ${formatNumber(total)} 条`;
+    $("requests-prev").disabled = offset <= 0;
+    $("requests-next").disabled = offset + count >= total || count === 0;
+    requestPage.limit = limit;
+    requestPage.offset = offset;
   }
 
   function render() {
@@ -91,7 +107,7 @@
       // Core machine/routing data keeps the console usable during a rolling
       // upgrade. Usage and request endpoints are optional for older managers.
       const [machineResult, routingResult] = await Promise.all([api("/admin/machines"), api("/admin/routing")]);
-      const [usageResult, requestResult] = await Promise.allSettled([api("/admin/usage?days=30"), api("/admin/requests?days=30&limit=100")]);
+      const [usageResult, requestResult] = await Promise.allSettled([api("/admin/usage?days=30"), api(`/admin/requests?days=30&limit=${requestPage.limit}&offset=${requestPage.offset}`)]);
       machines = machineResult.data || [];
       routing = routingResult;
       if (usageResult.status === "fulfilled") usage = usageResult.value || usage;
@@ -112,6 +128,8 @@
   $("auth-form").addEventListener("submit", async (event) => { event.preventDefault(); adminKey = $("admin-key").value.trim(); if (!adminKey) return; localStorage.setItem(keyName, adminKey); await load(); });
   $("routing-form").addEventListener("submit", async (event) => { event.preventDefault(); const error = $("routing-error"); error.textContent = ""; const minutes = Number($("routing-cooldown-minutes").value); if (!Number.isFinite(minutes) || minutes < 1) return error.textContent = "冷却时间至少为 1 分钟"; try { routing = await api("/admin/routing", { method: "PUT", body: JSON.stringify({ strategy: $("routing-strategy").value, rateLimitCooldownMs: Math.round(minutes * 60000) }) }); notify("调用策略已保存"); await load(); } catch (requestError) { error.textContent = requestError.message; } });
   $("refresh").addEventListener("click", load); $("logout").addEventListener("click", () => { localStorage.removeItem(keyName); adminKey = ""; machines = []; render(); setConnection(false, "未连接"); showAuth(); }); $("add-machine").addEventListener("click", () => openMachine()); $("close-machine").addEventListener("click", closeMachine); $("cancel-machine").addEventListener("click", closeMachine);
+  $("requests-prev").addEventListener("click", async () => { if (requestPage.offset <= 0) return; requestPage.offset = Math.max(0, requestPage.offset - requestPage.limit); await load(); });
+  $("requests-next").addEventListener("click", async () => { if (requestPage.offset + (requestRecords.data || []).length >= Number(requestRecords.total || 0)) return; requestPage.offset += requestPage.limit; await load(); });
   $("machines").addEventListener("click", async (event) => { const button = event.target.closest("button[data-action]"); if (!button) return; const machine = machines.find((item) => item.id === button.dataset.id); if (!machine) return; try { if (button.dataset.action === "edit") return openMachine(machine); if (button.dataset.action === "delete") { if (!window.confirm(`确认删除机器「${machine.name || machine.id}」？`)) return; await api(`/admin/machines/${encodeURIComponent(machine.id)}`, { method: "DELETE" }); notify("机器已删除"); } if (button.dataset.action === "check") { await api(`/admin/machines/${encodeURIComponent(machine.id)}/check`, { method: "POST" }); notify("检查完成"); } if (button.dataset.action === "toggle") { const action = machine.enabled === false ? "enable" : "disable"; await api(`/admin/machines/${encodeURIComponent(machine.id)}/${action}`, { method: "POST" }); notify(action === "enable" ? "机器已启用" : "机器已停用"); } await load(); } catch (error) { notify(error.message); } });
   $("machine-form").addEventListener("submit", async (event) => { event.preventDefault(); const originalId = $("machine-original-id").value; const id = $("machine-id").value.trim(); const payload = { name: $("machine-name").value.trim(), baseUrl: $("machine-url").value.trim(), enabled: $("machine-enabled").checked, weight: Number($("machine-weight").value || 1) }; const machineKey = $("machine-key").value.trim(); if (machineKey) payload.apiKey = machineKey; if (!originalId && !machineKey) return $("machine-error").textContent = "新机器必须填写 API Key"; try { await api(`/admin/machines/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(payload) }); closeMachine(); notify("机器配置已保存"); await load(); } catch (error) { $("machine-error").textContent = error.message; } });
   render(); load(); setInterval(load, 15000);

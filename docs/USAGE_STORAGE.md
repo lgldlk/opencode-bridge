@@ -33,13 +33,25 @@
   `completion_tokens_details.reasoning_tokens` 提供细分；缓存写入使用
   `cache_creation_input_tokens`（部分 provider 不返回该字段）。
 - 非流式响应读取 OpenAI `usage` 字段。
-- 流式响应由 machine bridge 发送内部 `bridge.usage` 帧，manager 解析后记录；该帧不会转发给客户端。
+- 流式响应中的标准 OpenAI `chat.completion.chunk` usage 帧由 manager 解析并记录；usage-only 帧只在上游已经开始真实模型输出后转发，避免把内部心跳当成模型消息。
 - OpenCode 的缓存字段对应 `tokens.cache.read` / `tokens.cache.write`，管理端分别展示为缓存读取和缓存写入。
 - `cache.read` 只有在本次请求命中 provider 的 prompt cache 时才会大于 0；
   `cache.write` 只有 provider 实际写入缓存并回报时才会大于 0，返回 0 不代表统计丢失。
 - 如果上游没有返回 usage，则不会估算 token，避免制造虚假额度数据。
 - 每次已完成的上游尝试都会计为一条请求；错误、超时或未返回 usage 时 token 字段为 0。
 - 这是网桥观测到的消耗量，不是 OpenCode 官方剩余额度。
+
+## 会话与缓存命中
+
+Pi 的 OpenAI-compatible provider 会使用稳定的 session affinity 标识。manager 将
+`x-session-id`（以及 `prompt_cache_key` 等兼容字段）规范化后继续传给 machine。
+machine 为同一会话复用一个 OpenCode session，并只追加新产生的 user/tool 消息；
+客户端重复发送的历史和上一条 assistant 响应不会再次拼进 prompt。
+
+如果消息前缀发生变化（例如切换分支、压缩上下文、编辑历史或重试旧请求），machine
+会放弃旧映射并完整同步一次，避免把不相关上下文串进原会话。同一会话的并发请求会
+串行执行，防止增量位置竞争。machine 重启或会话超过 TTL 后，首次请求需要重新建立
+缓存，后续请求才会恢复 cache read。
 
 ## 管理接口
 

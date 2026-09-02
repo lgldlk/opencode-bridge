@@ -114,6 +114,7 @@
         <div class="usage-card"><span>输出 Token</span><strong id="usage-output">-</strong></div>
         <div class="usage-card"><span>缓存读取</span><strong id="usage-cache-read">-</strong></div>
         <div class="usage-card"><span>缓存写入</span><strong id="usage-cache-write">-</strong></div>
+        <div class="usage-card usage-card-accent"><span>缓存命中率</span><strong id="usage-cache-rate">-</strong><small>缓存读 ÷ 输入总量</small></div>
         <div class="usage-card"><span>请求数</span><strong id="usage-requests">-</strong></div>
       </div>
       <div class="usage-table-wrap">
@@ -144,11 +145,18 @@
         <div class="request-summary-card"><span>总用量</span><strong id="request-total-usage">0</strong><small>消耗 Token</small></div>
         <div class="request-summary-card"><span>API 请求</span><strong id="request-total-count">0</strong><small>总请求数</small></div>
       </div>
-      <div class="usage-table-wrap">
+      <div class="usage-table-wrap requests-table-wrap">
         <table class="usage-table requests-table">
           <thead><tr><th>时间</th><th>机器</th><th>模型</th><th>状态</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
           <tbody id="request-records"><tr><td colspan="9" class="usage-empty">暂无调用记录</td></tr></tbody>
         </table>
+      </div>
+      <div class="requests-footer" aria-label="调用记录分页">
+        <span class="requests-page-info" id="requests-page-info">显示 0–0 / 共 0 条</span>
+        <div class="requests-page-actions">
+          <button class="button button-ghost button-small" id="requests-prev" type="button" disabled>上一页</button>
+          <button class="button button-ghost button-small" id="requests-next" type="button" disabled>下一页</button>
+        </div>
       </div>
     </section>
 
