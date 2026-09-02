@@ -7,249 +7,305 @@
   <title>OpenCode Manager — 机器控制台</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Kodchasan:wght@400;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/admin.css">
 </head>
 <body>
-  <div class="mesh-wrap" aria-hidden="true">
-    <div class="mesh mesh-1"></div>
-    <div class="mesh mesh-2"></div>
-    <div class="mesh mesh-3"></div>
-    <div class="mesh mesh-4"></div>
-    <div class="mesh mesh-5"></div>
-  </div>
+  <div class="bg-grid" aria-hidden="true"></div>
 
   <header class="topbar-wrap">
     <div class="topbar">
       <a class="brand" href="#">
-        <span class="brand-mark" aria-hidden="true">OC</span>
-        <span class="brand-text"><strong>OpenCode Manager</strong><span>机器控制台</span></span>
+        <span class="brand-mark">OC</span>
+        <span class="brand-text">
+          <strong>OpenCode Manager</strong>
+          <span>Control Plane · 机器控制台</span>
+        </span>
       </a>
+      <div class="topbar-meta">
+        <span class="live-dot" aria-hidden="true"><i></i> LIVE</span>
+        <span class="connection" id="connection">未连接</span>
+      </div>
       <nav class="topbar-nav" aria-label="管理操作">
-        <a class="button button-ghost" href="#guide">教程</a>
-        <button class="button button-ghost" id="refresh" type="button">
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M13.5 2.5v3.2H10.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <button class="btn btn-ghost btn-sm" id="refresh" type="button">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.5 8A5.5 5.5 0 1 1 8 2.5" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/><path d="M13.5 2.5v3.2H10.3" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
           刷新
         </button>
-        <button class="button button-ghost" id="logout" type="button">退出</button>
-        <button class="button button-lime" id="add-machine" type="button"><span aria-hidden="true">＋</span> 添加机器</button>
+        <a class="btn btn-ghost btn-sm" href="#guide" onclick="document.querySelector('[data-tab-target=guide]')?.click()">教程</a>
+        <button class="btn btn-ghost btn-sm" id="logout" type="button">退出</button>
+        <button class="btn btn-accent" id="add-machine" type="button">＋ 添加机器</button>
       </nav>
     </div>
   </header>
 
-  <main class="shell">
-    <div class="dashboard-layout">
-      <aside class="tab-sidebar" aria-label="控制台导航">
-        <div class="tab-sidebar-label">MANAGER</div>
+  <div class="shell">
+    <div class="layout">
+      <aside class="sidebar" aria-label="控制台导航">
+        <div class="sidebar-label">NAVIGATION</div>
         <nav class="tab-nav" role="tablist" aria-label="控制台页面">
-          <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="overview"><span aria-hidden="true">⌂</span>总览</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="usage"><span aria-hidden="true">◒</span>额度用量</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="requests"><span aria-hidden="true">≡</span>调用记录</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="routing"><span aria-hidden="true">⇄</span>调用策略</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="machines"><span aria-hidden="true">▣</span>机器列表</button>
-          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="guide"><span aria-hidden="true">?</span>配置教程</button>
+          <button class="tab-button active" type="button" role="tab" aria-selected="true" data-tab-target="overview">
+            <span class="tab-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 8.5L8 4l5 4.5V13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8.5z" stroke="currentColor" stroke-width="1.3"/><path d="M6 13V9h4v4" stroke="currentColor" stroke-width="1.3"/></svg></span>
+            总览
+          </button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="usage">
+            <span class="tab-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="4.5" stroke="currentColor" stroke-width="1.3"/><path d="M8 3.5V8l3 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+            额度用量
+          </button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="requests">
+            <span class="tab-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M3 5h10M3 8h10M3 11h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span>
+            调用记录
+          </button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="routing">
+            <span class="tab-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M5 4h8M3 8h10M5 12h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><circle cx="3.5" cy="4" r="1" fill="currentColor"/><circle cx="12.5" cy="8" r="1" fill="currentColor"/><circle cx="3.5" cy="12" r="1" fill="currentColor"/></svg></span>
+            调用策略
+          </button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="machines">
+            <span class="tab-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="3" y="3" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.3"/><path d="M3 7h10M7 7v6" stroke="currentColor" stroke-width="1.3"/></svg></span>
+            机器列表
+          </button>
+          <button class="tab-button" type="button" role="tab" aria-selected="false" data-tab-target="guide">
+            <span class="tab-ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="5" stroke="currentColor" stroke-width="1.3"/><path d="M8 7.5v3M8 5.5h.01" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+            配置教程
+          </button>
         </nav>
-      </aside>
-      <div class="dashboard-content">
-    <section class="hero" data-tab="overview">
-      <div class="hero-left">
-        <div class="pill">
-          <span class="pill-dot" aria-hidden="true"><span class="pill-ping"></span><span class="pill-core"></span></span>
-          <span>CONTROL PLANE • LIVE</span>
-        </div>
-        <h1>机器总览</h1>
-        <p class="hero-sub">健康检查、模型聚合与限流冷却的集中控制台。额度耗尽自动隔离，无需手动切换。</p>
-        <p class="muted" id="last-updated">等待连接</p>
-      </div>
-      <div class="hero-card" aria-hidden="true">
-        <div class="hero-card-head">
-          <span class="hero-card-title">Routing Preview</span>
-          <span class="hero-card-badge">LIVE</span>
-        </div>
-        <div class="hero-mesh"></div>
-        <div class="hero-stats-mini">
-          <div><span>策略</span><strong id="hero-strategy">额度用尽后切换</strong></div>
-          <div><span>冷却</span><strong id="hero-cooldown">60m</strong></div>
-        </div>
-        <div class="hero-bar"><i style="width:62%"></i></div>
-        <p class="hero-note">请求经 Manager 唯一入口分发，Machine 仅做推理</p>
-      </div>
-    </section>
-
-    <section class="stats" aria-label="服务统计" data-tab="overview">
-      <article class="stat">
-        <div class="stat-top"><span class="stat-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1.6" stroke="currentColor" stroke-width="1.3"/><path d="M5.5 6.5h5M5.5 9h3.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span><span>已注册机器</span></div>
-        <strong id="stat-total">-</strong>
-        <span class="stat-foot">总量</span>
-      </article>
-      <article class="stat stat-good">
-        <div class="stat-top"><span class="stat-icon good"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4.2 8.2l2.1 2.2 5-5.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span>健康</span></div>
-        <strong id="stat-healthy">-</strong>
-        <span class="stat-foot">可调度</span>
-      </article>
-      <article class="stat stat-warn">
-        <div class="stat-top"><span class="stat-icon warn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 5v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.2" r="1" fill="currentColor"/></svg></span><span>异常</span></div>
-        <strong id="stat-unhealthy">-</strong>
-        <span class="stat-foot">需关注</span>
-      </article>
-      <article class="stat">
-        <div class="stat-top"><span class="stat-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3.2l5.2 3v5.6L8 14.8 2.8 11.8V6.2L8 3.2z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M2.8 6.2l5.2 3 5.2-3M8 9.2v5.6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg></span><span>可用模型</span></div>
-        <strong id="stat-models">-</strong>
-        <span class="stat-foot">去重后</span>
-      </article>
-    </section>
-
-    <section class="panel usage-panel" data-tab="usage">
-      <div class="panel-head">
-        <div>
-          <div class="panel-eyebrow">TOKEN USAGE</div>
-          <h2>额度用量</h2>
-          <p class="muted">按网桥观测到的上游 usage 统计，不代表官方剩余额度</p>
-        </div>
-        <span class="panel-badge" id="usage-updated">等待数据</span>
-      </div>
-      <div class="usage-summary" aria-label="Token 总量">
-        <div class="usage-card"><span>总 Token</span><strong id="usage-total">-</strong></div>
-        <div class="usage-card"><span>输入 Token</span><strong id="usage-input">-</strong></div>
-        <div class="usage-card"><span>输出 Token</span><strong id="usage-output">-</strong></div>
-        <div class="usage-card"><span>缓存读取</span><strong id="usage-cache-read">-</strong></div>
-        <div class="usage-card"><span>缓存写入</span><strong id="usage-cache-write">-</strong></div>
-        <div class="usage-card usage-card-accent"><span>缓存命中率</span><strong id="usage-cache-rate">-</strong><small>缓存读 ÷ 输入总量</small></div>
-        <div class="usage-card"><span>请求数</span><strong id="usage-requests">-</strong></div>
-      </div>
-      <div class="usage-table-wrap">
-        <table class="usage-table">
-          <thead><tr><th>机器</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th><th>最后请求</th></tr></thead>
-          <tbody id="usage-machines"><tr><td colspan="8" class="usage-empty">暂无用量数据</td></tr></tbody>
-        </table>
-      </div>
-      <div class="usage-table-wrap usage-daily-wrap">
-        <div class="usage-subhead"><strong>每日明细</strong><span>最近 30 天，按机器独立统计</span></div>
-        <table class="usage-table">
-          <thead><tr><th>日期</th><th>机器</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
-          <tbody id="usage-daily"><tr><td colspan="8" class="usage-empty">暂无每日数据</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="panel requests-panel" data-tab="requests">
-      <div class="panel-head">
-        <div>
-          <div class="panel-eyebrow">REQUEST LOG</div>
-          <h2>调用记录</h2>
-          <p class="muted">每次机器尝试一条记录，包含状态和本次 token 消耗</p>
-        </div>
-        <span class="panel-badge" id="requests-meta">最近 30 天</span>
-      </div>
-      <div class="request-summary" aria-label="调用汇总">
-        <div class="request-summary-card"><span>总用量</span><strong id="request-total-usage">0</strong><small>消耗 Token</small></div>
-        <div class="request-summary-card"><span>API 请求</span><strong id="request-total-count">0</strong><small>总请求数</small></div>
-      </div>
-      <div class="usage-table-wrap requests-table-wrap">
-        <table class="usage-table requests-table">
-          <thead><tr><th>时间</th><th>机器</th><th>模型</th><th>状态</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
-          <tbody id="request-records"><tr><td colspan="9" class="usage-empty">暂无调用记录</td></tr></tbody>
-        </table>
-      </div>
-      <div class="requests-footer" aria-label="调用记录分页">
-        <span class="requests-page-info" id="requests-page-info">显示 0–0 / 共 0 条</span>
-        <div class="requests-page-actions">
-          <button class="button button-ghost button-small" id="requests-prev" type="button" disabled>上一页</button>
-          <button class="button button-ghost button-small" id="requests-next" type="button" disabled>下一页</button>
-        </div>
-      </div>
-    </section>
-
-    <section class="panel routing-panel" data-tab="routing">
-      <div class="panel-head">
-        <div>
-          <div class="panel-eyebrow">ROUTING POLICY</div>
-          <h2>调用策略</h2>
-          <p class="muted">额度耗尽的机器会进入冷却，期间不会接收新请求</p>
-        </div>
-        <span class="panel-badge">持久化</span>
-      </div>
-      <form class="routing-form" id="routing-form">
-        <label><span class="field-label">机器选择</span>
-          <select id="routing-strategy">
-            <option value="round_robin">自动轮询</option>
-            <option value="random">随机</option>
-            <option value="quota_failover">额度用尽后切换</option>
-          </select>
-        </label>
-        <label><span class="field-label">限流冷却时间（分钟）</span>
-          <input id="routing-cooldown-minutes" type="number" min="1" max="10080" step="1" value="60" required>
-        </label>
-        <div class="routing-actions">
-          <span class="form-error" id="routing-error" role="alert"></span>
-          <button class="button button-lime button-wide-sm" type="submit">保存策略</button>
-        </div>
-      </form>
-    </section>
-
-    <section class="panel" data-tab="machines">
-      <div class="panel-head">
-        <div>
-          <div class="panel-eyebrow">FLEET</div>
-          <h2>机器列表</h2>
-          <p class="muted">实时状态与路由配置</p>
-        </div>
-        <span class="connection" id="connection">未连接</span>
-      </div>
-      <div class="machine-list" id="machines">
-        <div class="empty">
-          <div class="empty-icon" aria-hidden="true">
-            <svg width="28" height="28" viewBox="0 0 32 32" fill="none"><rect x="6" y="8" width="20" height="14" rx="3" stroke="#b8c4bf" stroke-width="1.4"/><circle cx="12" cy="15" r="2" stroke="#b8c4bf" stroke-width="1.4"/><path d="M16 15h8M6 22h20" stroke="#d3ddd6" stroke-width="1.3" stroke-linecap="round"/></svg>
+        <div class="sidebar-foot">
+          <div class="sidebar-card">
+            <div class="sidebar-card-label">MANAGER API</div>
+            <div class="mono">/v1/chat/completions</div>
+            <div class="muted-xs">客户端仅连接 Manager，SSE 兼容 OpenAI</div>
           </div>
-          <p class="empty-title">输入管理密钥后载入机器</p>
-          <p class="empty-sub">已配置的机器会在此显示健康状态、模型与延迟</p>
         </div>
-      </div>
-    </section>
+      </aside>
 
-    <section class="panel guide-panel" id="guide" data-tab="guide">
-      <div class="panel-head">
-        <div>
-          <div class="panel-eyebrow">SETUP GUIDE</div>
-          <h2>配置教程</h2>
-          <p class="muted">3 分钟完成接入：注册机器 → 选择策略 → 客户端只连 Manager</p>
-        </div>
-        <span class="panel-badge">必读 · 5 步</span>
-      </div>
-      <div class="guide-body">
-        <div class="guide-steps">
-          <article class="guide-step">
-            <div class="guide-num">01</div>
-            <h3>登录管理端</h3>
-            <p>打开 <code>/admin</code> 输入 <code>MANAGER_ADMIN_KEY</code>（来自 <code>config/manager.env.local</code> 或 <code>/etc/opencode-manager.env</code>）。该 Key 仅存于本浏览器 localStorage，用于 <code>/admin/*</code>。</p>
-            <div class="guide-code"><pre><code>http://MANAGER:8090/admin
+      <div class="dashboard-content">
+        <!-- OVERVIEW -->
+        <section class="page-header" data-tab="overview">
+          <div class="page-header-main">
+            <div class="eyebrow"><span class="eyebrow-dot"></span> CONTROL PLANE — LIVE</div>
+            <h1>机器总览</h1>
+            <p class="lead">健康检查、模型聚合与限流冷却的集中控制台。额度耗尽自动隔离，无需手动切换。</p>
+            <div class="header-meta">
+              <span class="meta-chip" id="last-updated">等待连接</span>
+              <span class="meta-sep">·</span>
+              <span class="meta-chip"><strong id="hero-strategy">额度用尽后切换</strong> · <span id="hero-cooldown">60m</span> 冷却</span>
+            </div>
+          </div>
+          <div class="page-header-side">
+            <div class="mini-panel">
+              <div class="mini-panel-head">
+                <span>路由状态</span>
+                <span class="badge-live">LIVE</span>
+              </div>
+              <div class="mini-metrics">
+                <div><label>当前策略</label><strong id="hero-strategy-dup">额度用尽后切换</strong></div>
+                <div><label>限流窗口</label><strong id="hero-cooldown-dup">60 分钟</strong></div>
+              </div>
+              <div class="progress-track"><i style="width:62%"></i></div>
+              <p class="mini-note">请求经 Manager 唯一入口分发，Machine 仅做推理</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="stats" aria-label="服务统计" data-tab="overview">
+          <article class="stat">
+            <div class="stat-label"><span class="stat-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><rect x="2.5" y="3.5" width="11" height="9" rx="1.6" stroke="currentColor" stroke-width="1.25"/><path d="M5.5 6.5h5M5.5 9h3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg></span> 已注册机器</div>
+            <div class="stat-value" id="stat-total">-</div>
+            <div class="stat-foot">总量 · Fleet size</div>
+          </article>
+          <article class="stat stat-good">
+            <div class="stat-label"><span class="stat-icon good"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M4.2 8.2l2.1 2.2 5-5.2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span> 健康</div>
+            <div class="stat-value" id="stat-healthy">-</div>
+            <div class="stat-foot">可调度</div>
+          </article>
+          <article class="stat stat-warn">
+            <div class="stat-label"><span class="stat-icon warn"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 5.2v4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="8" cy="11.2" r="1" fill="currentColor"/></svg></span> 异常</div>
+            <div class="stat-value" id="stat-unhealthy">-</div>
+            <div class="stat-foot">需关注</div>
+          </article>
+          <article class="stat">
+            <div class="stat-label"><span class="stat-icon"><svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 3.2l5.2 3v5.6L8 14.8 2.8 11.8V6.2L8 3.2z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M2.8 6.2l5.2 3 5.2-3M8 9.2v5.6" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/></svg></span> 可用模型</div>
+            <div class="stat-value" id="stat-models">-</div>
+            <div class="stat-foot">去重后 · Unique models</div>
+          </article>
+        </section>
+
+        <!-- USAGE -->
+        <section class="panel usage-panel" data-tab="usage">
+          <div class="panel-head">
+            <div>
+              <div class="panel-eyebrow">TOKEN USAGE</div>
+              <h2>额度用量</h2>
+              <p class="muted">按网桥观测到的上游 usage 统计，不代表官方剩余额度</p>
+            </div>
+            <span class="panel-badge" id="usage-updated">等待数据</span>
+          </div>
+          <div class="usage-filter" id="usage-filter">
+            <div class="segmented" role="group" aria-label="日期筛选">
+              <button type="button" data-range="today" class="seg-btn active">今日</button>
+              <button type="button" data-range="yesterday" class="seg-btn">昨日</button>
+              <button type="button" data-range="7d" class="seg-btn">近7天</button>
+              <button type="button" data-range="30d" class="seg-btn">近30天</button>
+            </div>
+            <label class="date-field"><input type="date" id="usage-date-input"><span>自定义日期</span></label>
+            <span class="filter-meta mono" id="usage-filter-meta">今日</span>
+          </div>
+          <div class="usage-summary">
+            <div class="usage-card usage-card--primary"><span>总 Token</span><strong id="usage-total">-</strong><small>All time</small></div>
+            <div class="usage-card"><span>输入 Token</span><strong id="usage-input">-</strong></div>
+            <div class="usage-card"><span>输出 Token</span><strong id="usage-output">-</strong></div>
+            <div class="usage-card"><span>请求数</span><strong id="usage-requests">-</strong></div>
+            <div class="usage-card"><span>缓存读取</span><strong id="usage-cache-read">-</strong></div>
+            <div class="usage-card"><span>缓存写入</span><strong id="usage-cache-write">-</strong></div>
+            <div class="usage-card usage-card--accent"><span>缓存命中率</span><strong id="usage-cache-rate">-</strong><small>缓存读 ÷ 输入总量</small></div>
+          </div>
+          <div class="table-wrap">
+            <table class="table">
+              <thead><tr><th>机器</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th><th>最后请求</th></tr></thead>
+              <tbody id="usage-machines"><tr><td colspan="8" class="empty-cell">暂无用量数据</td></tr></tbody>
+            </table>
+          </div>
+          <div class="usage-daily">
+            <div class="subhead"><strong>每日明细</strong><span>最近 30 天 · 按机器独立统计</span></div>
+            <div class="table-wrap">
+              <table class="table">
+                <thead><tr><th>日期</th><th>机器</th><th>请求</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
+                <tbody id="usage-daily"><tr><td colspan="8" class="empty-cell">暂无每日数据</td></tr></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <!-- REQUESTS -->
+        <section class="panel requests-panel" data-tab="requests">
+          <div class="panel-head">
+            <div>
+              <div class="panel-eyebrow">REQUEST LOG</div>
+              <h2>调用记录</h2>
+              <p class="muted">每次机器尝试一条记录，包含状态和本次 token 消耗</p>
+            </div>
+            <span class="panel-badge" id="requests-meta">最近 30 天</span>
+          </div>
+          <div class="request-summary">
+            <div class="request-card"><span>总用量</span><strong id="request-total-usage">0</strong><small>消耗 Token</small></div>
+            <div class="request-card"><span>API 请求</span><strong id="request-total-count">0</strong><small>总请求数</small></div>
+          </div>
+          <div class="table-wrap requests-table-wrap">
+            <table class="table requests-table">
+              <thead><tr><th>时间</th><th>机器</th><th>模型</th><th>状态</th><th>输入</th><th>输出</th><th>缓存读</th><th>缓存写</th><th>总 Token</th></tr></thead>
+              <tbody id="request-records"><tr><td colspan="9" class="empty-cell">暂无调用记录</td></tr></tbody>
+            </table>
+          </div>
+          <div class="requests-footer">
+            <span class="page-info" id="requests-page-info">显示 0–0 / 共 0 条</span>
+            <div class="page-actions">
+              <button class="btn btn-ghost btn-sm" id="requests-prev" type="button" disabled>上一页</button>
+              <button class="btn btn-ghost btn-sm" id="requests-next" type="button" disabled>下一页</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- ROUTING -->
+        <section class="panel routing-panel" data-tab="routing">
+          <div class="panel-head">
+            <div>
+              <div class="panel-eyebrow">ROUTING POLICY</div>
+              <h2>调用策略</h2>
+              <p class="muted">额度耗尽的机器会进入冷却，期间不会接收新请求 · 持久化到 Manager</p>
+            </div>
+            <span class="panel-badge">持久化</span>
+          </div>
+          <form class="routing-form" id="routing-form">
+            <label><span class="field-label">机器选择</span>
+              <select id="routing-strategy">
+                <option value="round_robin">自动轮询</option>
+                <option value="random">随机</option>
+                <option value="quota_failover">额度用尽后切换</option>
+              </select>
+            </label>
+            <label><span class="field-label">限流冷却时间（分钟）</span>
+              <input id="routing-cooldown-minutes" type="number" min="1" max="10080" step="1" value="60" required>
+            </label>
+            <div class="routing-actions">
+              <span class="form-error" id="routing-error" role="alert"></span>
+              <button class="btn btn-accent btn-wide-sm" type="submit">保存策略</button>
+            </div>
+          </form>
+        </section>
+
+        <!-- MACHINES -->
+        <section class="panel" data-tab="machines">
+          <div class="panel-head">
+            <div>
+              <div class="panel-eyebrow">FLEET</div>
+              <h2>机器列表</h2>
+              <p class="muted">实时状态与路由配置 · 点击检查立即探测</p>
+            </div>
+            <span class="panel-badge mono" id="fleet-count">— 台</span>
+          </div>
+          <div class="machine-list" id="machines">
+            <div class="empty">
+              <div class="empty-icon" aria-hidden="true">
+                <svg width="28" height="28" viewBox="0 0 32 32" fill="none"><rect x="6" y="8" width="20" height="14" rx="3" stroke="#b8c4bf" stroke-width="1.4"/><circle cx="12" cy="15" r="2" stroke="#b8c4bf" stroke-width="1.4"/><path d="M16 15h8M6 22h20" stroke="#d3ddd6" stroke-width="1.3" stroke-linecap="round"/></svg>
+              </div>
+              <p class="empty-title">输入管理密钥后载入机器</p>
+              <p class="empty-sub">已配置的机器会在此显示健康状态、模型与延迟</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- GUIDE -->
+        <section class="panel guide-panel" id="guide" data-tab="guide">
+          <div class="panel-head">
+            <div>
+              <div class="panel-eyebrow">SETUP GUIDE</div>
+              <h2>配置教程</h2>
+              <p class="muted">3 分钟完成接入：注册机器 → 选择策略 → 客户端只连 Manager</p>
+            </div>
+            <span class="panel-badge">5 步 · 必读</span>
+          </div>
+          <div class="guide-body">
+            <div class="guide-timeline">
+              <article class="guide-step">
+                <div class="guide-num">01</div>
+                <div class="guide-content">
+                  <h3>登录管理端</h3>
+                  <p>打开 <code>/admin</code> 输入 <code>MANAGER_ADMIN_KEY</code>（来自 <code>config/manager.env.local</code> 或 <code>/etc/opencode-manager.env</code>）。该 Key 仅存于本浏览器 localStorage，用于 <code>/admin/*</code>。</p>
+                  <div class="code-block"><pre><code>http://MANAGER:8090/admin
 # 输入 MANAGER_ADMIN_KEY</code></pre></div>
-          </article>
-          <article class="guide-step">
-            <div class="guide-num">02</div>
-            <h3>注册机器</h3>
-            <p>点右上角 <b>添加机器</b>，填 <code>机器 ID</code>（如 <code>sg-01</code>）、<code>名称</code>、<code>Base URL</code>（Machine 桥根地址，不含 <code>/v1</code>）与 <code>API Key</code>（Machine 的 <code>BRIDGE_KEY</code>）。编辑时留空 Key 则保留原值。</p>
-            <div class="guide-code"><pre><code>Base URL: https://machine-01.example.internal
+                </div>
+              </article>
+              <article class="guide-step">
+                <div class="guide-num">02</div>
+                <div class="guide-content">
+                  <h3>注册机器</h3>
+                  <p>点右上角 <b>添加机器</b>，填 <code>机器 ID</code>（如 <code>sg-01</code>）、<code>名称</code>、<code>Base URL</code>（Machine 桥根地址，不含 <code>/v1</code>）与 <code>API Key</code>（Machine 的 <code>BRIDGE_KEY</code>）。编辑时留空 Key 则保留原值。</p>
+                  <div class="code-block"><pre><code>Base URL: https://machine-01.example.internal
 # 或 http://127.0.0.1:8080（本机 machine）</code></pre></div>
-          </article>
-          <article class="guide-step">
-            <div class="guide-num">03</div>
-            <h3>检查与启用</h3>
-            <p>列表中点 <b>检查</b> 立即探测 <code>/health</code> 与 <code>/v1/models</code>；<b>启用/停用</b> 控制是否参与路由。异常卡会标 <code>异常</code>，冷却中显示剩余时间。</p>
-            <div class="guide-meta"><span class="status healthy">健康</span><span class="status cooling_down">60 分钟冷却</span><span class="status unhealthy">异常</span></div>
-          </article>
-          <article class="guide-step">
-            <div class="guide-num">04</div>
-            <h3>选择调用策略</h3>
-            <p><b>额度用尽后切换</b> 会持续使用当前机器，收到 429/额度耗尽后才切到下一台；<b>自动轮询</b> 每次请求轮换，<b>随机</b> 随机挑选。限流冷却默认 <b>60 分钟</b>。</p>
-            <div class="guide-code"><pre><code>PUT /admin/routing
+                </div>
+              </article>
+              <article class="guide-step">
+                <div class="guide-num">03</div>
+                <div class="guide-content">
+                  <h3>检查与启用</h3>
+                  <p>列表中点 <b>检查</b> 立即探测 <code>/health</code> 与 <code>/v1/models</code>；<b>启用/停用</b> 控制是否参与路由。异常卡会标 <code>异常</code>，冷却中显示剩余时间。</p>
+                  <div class="guide-meta"><span class="status healthy">健康</span><span class="status cooling_down">60 分钟冷却</span><span class="status unhealthy">异常</span></div>
+                </div>
+              </article>
+              <article class="guide-step">
+                <div class="guide-num">04</div>
+                <div class="guide-content">
+                  <h3>选择调用策略</h3>
+                  <p><b>额度用尽后切换</b> 会持续使用当前机器，收到 429/额度耗尽后才切到下一台；<b>自动轮询</b> 每次请求轮换，<b>随机</b> 随机挑选。限流冷却默认 <b>60 分钟</b>。</p>
+                  <div class="code-block"><pre><code>PUT /admin/routing
 { "strategy": "quota_failover", "rateLimitCooldownMs": 3600000 }</code></pre></div>
-          </article>
-          <article class="guide-step">
-            <div class="guide-num">05</div>
-            <h3>客户端接入</h3>
-            <p>客户端 <b>只连 Manager</b>，用 <code>MANAGER_API_KEY</code>（与 Admin Key 不同）。兼容 OpenAI 的 <code>/v1/models</code> 与 <code>/v1/chat/completions</code>（含 SSE）。</p>
-            <div class="guide-code"><pre><code>curl http://MANAGER:8090/v1/chat/completions \
+                </div>
+              </article>
+              <article class="guide-step">
+                <div class="guide-num">05</div>
+                <div class="guide-content">
+                  <h3>客户端接入</h3>
+                  <p>客户端 <b>只连 Manager</b>，用 <code>MANAGER_API_KEY</code>（与 Admin Key 不同）。兼容 OpenAI 的 <code>/v1/models</code> 与 <code>/v1/chat/completions</code>（含 SSE）。</p>
+                  <div class="code-block"><pre><code>curl http://MANAGER:8090/v1/chat/completions \
   -H "Authorization: Bearer $MANAGER_API_KEY" \
   -H "content-type: application/json" \
   -d '{"model":"provider/model","messages":[{"role":"user","content":"hello"}]}'
@@ -257,31 +313,34 @@
 # Pi / OpenAI SDK 填：
 # baseUrl = http://MANAGER:8090/v1
 # apiKey  = MANAGER_API_KEY</code></pre></div>
-          </article>
-          <article class="guide-step guide-step-wide">
-            <div class="guide-num">06</div>
-            <h3>验证与排障</h3>
-            <p>先看顶部统计与 <code id="guide-last-updated-hint">最后更新</code> 时间戳，再各发一次普通与工具调用请求，确认工具在客户端本地执行。</p>
-            <div class="guide-grid-mini">
-              <div><b>健康检查</b><code>GET /health</code> → <code>{"ok":true,"healthy":2}</code></div>
-              <div><b>模型列表</b><code>GET /v1/models</code> 需带 MANAGER_API_KEY</div>
-              <div><b>日志</b><code>journalctl -u opencode-manager -n 100</code></div>
+                </div>
+              </article>
+              <article class="guide-step guide-step--wide">
+                <div class="guide-num">06</div>
+                <div class="guide-content">
+                  <h3>验证与排障</h3>
+                  <p>先看顶部统计与最后更新时间戳，再各发一次普通与工具调用请求，确认工具在客户端本地执行。</p>
+                  <div class="guide-grid">
+                    <div><b>健康检查</b><code>GET /health</code> → <code>{"ok":true,"healthy":2}</code></div>
+                    <div><b>模型列表</b><code>GET /v1/models</code> 需带 MANAGER_API_KEY</div>
+                    <div><b>日志</b><code>journalctl -u opencode-manager -n 100</code></div>
+                  </div>
+                </div>
+              </article>
             </div>
-          </article>
-        </div>
-        <div class="guide-foot">
-          <div class="guide-foot-left">
-            <b>密钥区分：</b> <code>MANAGER_ADMIN_KEY</code> 管控制台，<code>MANAGER_API_KEY</code> 管客户端，<code>BRIDGE_KEY</code> 管 Machine。勿混用，不要提交到 Git。
+            <div class="guide-foot">
+              <div class="guide-foot-left">
+                <b>密钥区分：</b> <code>MANAGER_ADMIN_KEY</code> 管控制台，<code>MANAGER_API_KEY</code> 管客户端，<code>BRIDGE_KEY</code> 管 Machine。勿混用，不要提交到 Git。
+              </div>
+              <a class="btn btn-accent" href="#" onclick="document.getElementById('add-machine').click(); return false;">去添加机器</a>
+            </div>
           </div>
-          <a class="button button-lime" href="#" onclick="document.getElementById('add-machine').click(); return false;">去添加机器</a>
-        </div>
-      </div>
-    </section>
+        </section>
 
       </div>
     </div>
-    <p class="footnote">所有 `id` 与 `/admin/*` 接口保持不变，仅视觉层对齐 Commission 参考 UI。</p>
-  </main>
+    <p class="footnote">所有 id 与 /admin/* 接口保持不变，仅视觉层优化。</p>
+  </div>
 
   <div class="modal-backdrop hidden" id="auth-modal">
     <section class="modal" role="dialog" aria-modal="true" aria-labelledby="auth-title">
@@ -295,7 +354,7 @@
       <form id="auth-form">
         <label><span class="field-label">管理密钥</span><input id="admin-key" type="password" autocomplete="current-password" required placeholder="Bearer key"></label>
         <p class="form-error" id="auth-error" role="alert"></p>
-        <button class="button button-lime button-wide" type="submit">连接</button>
+        <button class="btn btn-accent btn-wide" type="submit">连接</button>
       </form>
     </section>
   </div>
@@ -323,8 +382,8 @@
         </div>
         <p class="form-error" id="machine-error" role="alert"></p>
         <div class="modal-actions">
-          <button class="button button-ghost" id="cancel-machine" type="button">取消</button>
-          <button class="button button-lime" type="submit">保存</button>
+          <button class="btn btn-ghost" id="cancel-machine" type="button">取消</button>
+          <button class="btn btn-accent" type="submit">保存</button>
         </div>
       </form>
     </section>
@@ -332,5 +391,15 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script src="/admin.js" defer></script>
+  <script>
+    // sync hero dup values for new layout
+    const _orig = document.getElementById('hero-strategy');
+    const _dup = document.getElementById('hero-strategy-dup');
+    const _c = document.getElementById('hero-cooldown');
+    const _cdup = document.getElementById('hero-cooldown-dup');
+    const _obs = new MutationObserver(()=>{ if(_orig&&_dup) _dup.textContent=_orig.textContent; if(_c&&_cdup) _cdup.textContent=_c.textContent.replace('m',' 分钟'); });
+    if(_orig) _obs.observe(_orig,{childList:true,characterData:true,subtree:true});
+    if(_c) _obs.observe(_c,{childList:true,characterData:true,subtree:true});
+  </script>
 </body>
 </html>
