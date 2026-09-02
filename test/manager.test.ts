@@ -9,13 +9,17 @@ const { spawn } = require("node:child_process");
 const root = path.resolve(__dirname, "..");
 
 function mockMachine(mode = "ok") {
-  const state = { mode, completionRequests: 0, lastInput: null };
+  const state = { mode, completionRequests: 0, lastInput: null, lastHeaders: null };
   const server = http.createServer(async (req, res) => {
     if (req.headers.authorization !== "Bearer machine-key") return res.writeHead(401).end();
-    if (req.url === "/health") return res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+    if (req.url === "/health") {
+      if (state.mode === "offline") return res.writeHead(503, { "content-type": "application/json" }).end('{"ok":false}');
+      return res.writeHead(200, { "content-type": "application/json" }).end('{"ok":true}');
+    }
     if (req.url === "/v1/models") return res.writeHead(200, { "content-type": "application/json" }).end('{"data":[{"id":"opencode/big-pickle"}]}');
     if (req.url === "/v1/chat/completions") {
       state.completionRequests += 1;
+      state.lastHeaders = { ...req.headers };
       if (state.mode === "fail") return res.writeHead(503, { "content-type": "application/json" }).end('{"error":{"message":"offline"}}');
       if (state.mode === "rate") return res.writeHead(429, { "retry-after": "10", "content-type": "application/json" }).end('{"error":{"message":"rate limited"}}');
       let body = "";
@@ -33,6 +37,50 @@ function mockMachine(mode = "ok") {
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, state, url: `http://127.0.0.1:${server.address().port}` })));
 }
+
+test("manager preserves Pi session affinity for JSON and SSE machine requests", async (t) => {
+  const machine = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-session-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({
+    machines: [{ id: "machine", baseUrl: machine.url, apiKey: "machine-key" }],
+  }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await new Promise((resolve) => machine.server.close(resolve));
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const endpoint = `http://127.0.0.1:${managerPort}/v1/chat/completions`;
+
+  const jsonResponse = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer client-key",
+      "content-type": "application/json",
+      "x-session-id": "pi-json-session",
+    },
+    body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "hi" }] }),
+  });
+  assert.equal(jsonResponse.status, 200);
+  assert.equal(machine.state.lastHeaders["x-session-id"], "pi-json-session");
+
+  const streamResponse = await fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opencode/big-pickle",
+      stream: true,
+      prompt_cache_key: "pi-body-session",
+      messages: [{ role: "user", content: "hi again" }],
+    }),
+  });
+  assert.equal(streamResponse.status, 200);
+  await streamResponse.text();
+  // prompt_cache_key is a cache partition, not an OpenCode conversation ID.
+  assert.equal(machine.state.lastHeaders["x-session-id"], undefined);
+});
 
 function startManager(configPath, port) {
   const child = spawn(process.execPath, ["--experimental-strip-types", path.join(root, "src/manager.ts")], {
@@ -81,6 +129,120 @@ test("manager keeps using one machine until quota failover is triggered", async 
   assert.equal(second.state.completionRequests, 1);
   assert.equal((await request()).status, 200);
   assert.equal(first.state.completionRequests, 3);
+  assert.equal(second.state.completionRequests, 2);
+});
+
+test("manager keeps a session pinned in quota failover so provider cache stays local", async (t) => {
+  const first = await mockMachine("ok");
+  const second = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-session-quota-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "first", baseUrl: first.url, apiKey: "machine-key" },
+    { id: "second", baseUrl: second.url, apiKey: "machine-key" },
+  ] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await Promise.all([new Promise((resolve) => first.server.close(resolve)), new Promise((resolve) => second.server.close(resolve))]);
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const endpoint = `http://127.0.0.1:${managerPort}/v1/chat/completions`;
+  const request = () => fetch(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer client-key",
+      "content-type": "application/json",
+      "x-session-id": "stable-provider-session",
+    },
+    body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "same session" }] }),
+  });
+
+  assert.equal((await request()).status, 200);
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 2);
+  assert.equal(second.state.completionRequests, 0);
+
+  first.state.mode = "rate";
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 3);
+  assert.equal(second.state.completionRequests, 1);
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 3);
+  assert.equal(second.state.completionRequests, 2);
+});
+
+test("manager repins prompt-cache-only sessions after a machine failover", async (t) => {
+  const first = await mockMachine("ok");
+  const second = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-cache-failover-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "first", baseUrl: first.url, apiKey: "machine-key" },
+    { id: "second", baseUrl: second.url, apiKey: "machine-key" },
+  ] }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await Promise.all([new Promise((resolve) => first.server.close(resolve)), new Promise((resolve) => second.server.close(resolve))]);
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const endpoint = `http://127.0.0.1:${managerPort}/v1/chat/completions`;
+  const request = () => fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "opencode/big-pickle",
+      prompt_cache_key: "cache-only-session",
+      messages: [{ role: "user", content: "cache failover" }],
+    }),
+  });
+
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 1);
+  first.state.mode = "rate";
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 2);
+  assert.equal(second.state.completionRequests, 1);
+  second.state.mode = "ok";
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, 2, "cooled first machine must stay skipped");
+  assert.equal(second.state.completionRequests, 2, "cache-only session must remain pinned to failover target");
+});
+
+test("manager quota failover skips known unhealthy machines", async (t) => {
+  const first = await mockMachine("offline");
+  const second = await mockMachine("ok");
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "opencode-manager-health-routing-"));
+  const configPath = path.join(tempDir, "config.json");
+  await fs.promises.writeFile(configPath, JSON.stringify({ machines: [
+    { id: "first", baseUrl: first.url, apiKey: "machine-key" },
+    { id: "second", baseUrl: second.url, apiKey: "machine-key" },
+  ], routing: { strategy: "quota_failover", rateLimitCooldownMs: 60_000 } }));
+  const managerPort = await freePort();
+  const manager = await startManager(configPath, managerPort);
+  t.after(async () => {
+    manager.kill("SIGTERM");
+    await Promise.all([new Promise((resolve) => first.server.close(resolve)), new Promise((resolve) => second.server.close(resolve))]);
+    await fs.promises.rm(tempDir, { recursive: true, force: true });
+  });
+  const endpoint = `http://127.0.0.1:${managerPort}/v1/chat/completions`;
+  const request = () => fetch(endpoint, {
+    method: "POST",
+    headers: { authorization: "Bearer client-key", "content-type": "application/json" },
+    body: JSON.stringify({ model: "opencode/big-pickle", messages: [{ role: "user", content: "health routing" }] }),
+  });
+  const check = await fetch(`${endpoint.replace("/v1/chat/completions", "")}/admin/machines/first/check`, {
+    method: "POST",
+    headers: { authorization: "Bearer admin-key" },
+  });
+  assert.equal(check.status, 200);
+  assert.equal((await request()).status, 200);
+  const before = first.state.completionRequests;
+  assert.equal((await request()).status, 200);
+  assert.equal(first.state.completionRequests, before, "known unhealthy machine must not be retried first");
   assert.equal(second.state.completionRequests, 2);
 });
 
@@ -195,8 +357,7 @@ test("manager sends SSE headers and heartbeats before a slow machine responds", 
   let output = "";
   const first = await reader.read();
   output += decoder.decode(first.value, { stream: true });
-  assert.match(output, /data: \{"id":"sse-manager-keep-alive"/);
-  assert.match(output, /"choices":\[\{"index":0,"delta":\{\},"finish_reason":null\}\]/);
+  assert.match(output, /: manager-keep-alive/);
   assert.ok(Buffer.byteLength(output) >= 2 * 1024);
   const deadline = Date.now() + 12_000;
   while (!output.includes("[DONE]") && Date.now() < deadline) {
@@ -206,7 +367,7 @@ test("manager sends SSE headers and heartbeats before a slow machine responds", 
   }
   assert.match(output, /data: .*ok/);
   assert.match(output, /data: \[DONE\]/);
-  assert.match(output, /data: \{"id":"sse-manager-keep-alive"/);
+  assert.match(output, /: manager-keep-alive/);
 });
 
 test("manager fails over when a machine sends only heartbeats", async (t) => {

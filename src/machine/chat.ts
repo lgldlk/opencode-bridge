@@ -2,16 +2,14 @@
 
 const crypto = require("node:crypto");
 const path = require("node:path");
-const { json, sseHeaders, sseDataHeartbeat, SSE_HEARTBEAT_INTERVAL_MS, httpError } = require("../shared/http.ts");
+const { json, sseHeaders, sseHeartbeat, SSE_HEARTBEAT_INTERVAL_MS, httpError } = require("../shared/http.ts");
 const { completion, extractText, selectModel } = require("./models.ts");
 const { clientToolContract, sanitizeClientToolArguments, validateClientToolArguments } = require("./tool-contract.ts");
-const { renderOpenCodePrompt } = require("./canonical-messages.ts");
-const { usageFromMessage, toOpenAIUsage } = require("../shared/usage.ts");
+const { canonicalize, renderOpenCodePrompt } = require("./canonical-messages.ts");
+const { requestSessionContext } = require("../shared/session.ts");
+const { mergeTokenUsage, usageFromMessage, toOpenAIUsage } = require("../shared/usage.ts");
+import type { JsonObject } from "../shared/types.ts";
 
-const FALLBACK_TOOL_IDS = [
-  "invalid", "question", "bash", "read", "glob", "grep", "edit", "write",
-  "task", "webfetch", "todowrite", "websearch", "skill", "apply_patch",
-];
 const bridgePool = {
   free: [],
   waiters: [],
@@ -19,19 +17,63 @@ const bridgePool = {
   initialized: false,
 };
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000;
+const DEFAULT_SESSION_MAX_ENTRIES = 1_000;
 
 function sessionTtlMs() {
   const value = Number(process.env.OPENCODE_SESSION_TTL_MS || DEFAULT_SESSION_TTL_MS);
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_SESSION_TTL_MS;
 }
 
-function requestSessionKey(req, body) {
-  const headers = req?.headers || {};
-  const explicit = headers["x-session-id"] || headers["x-conversation-id"]
-    || headers["x-opencode-session-id"] || body?.session_id || body?.conversation_id
-    || body?.metadata?.session_id || body?.metadata?.conversation_id;
-  if (typeof explicit === "string" && explicit.trim()) return explicit.trim().slice(0, 256);
-  return null;
+function sessionMaxEntries() {
+  const value = Number(process.env.OPENCODE_SESSION_MAX_ENTRIES || DEFAULT_SESSION_MAX_ENTRIES);
+  return Number.isSafeInteger(value) && value > 0 ? value : DEFAULT_SESSION_MAX_ENTRIES;
+}
+
+function messageFingerprint(message) {
+  const normalized = canonicalize([message])[0] || null;
+  return crypto.createHash("sha256").update(JSON.stringify(normalized)).digest("base64url");
+}
+
+function messageFingerprints(messages) {
+  return (Array.isArray(messages) ? messages : []).map(messageFingerprint);
+}
+
+function openCodeErrorIdentity(entry) {
+  const id = entry?.info?.id;
+  if (typeof id === "string" && id) return `id:${id}`;
+  return `fallback:${crypto.createHash("sha256").update(JSON.stringify({
+    role: entry?.info?.role,
+    error: entry?.info?.error,
+    created: entry?.info?.time?.created ?? entry?.info?.createdAt,
+  })).digest("base64url")}`;
+}
+
+function validateMessages(messages) {
+  if (!Array.isArray(messages)) return;
+  for (const [index, message] of messages.entries()) {
+    if (!message || typeof message !== "object" || Array.isArray(message) || typeof message.role !== "string") {
+      throw httpError(`messages[${index}] must be an object with a string role`, 400, {
+        type: "invalid_request_error",
+        param: `messages[${index}]`,
+      });
+    }
+  }
+}
+
+function assistantMessageForText(text) {
+  return { role: "assistant", content: String(text || "") };
+}
+
+function assistantMessageForTools(calls) {
+  return {
+    role: "assistant",
+    content: null,
+    tool_calls: (Array.isArray(calls) ? calls : []).filter(Boolean).map((call) => ({
+      id: call.id,
+      type: "function",
+      function: { name: call.name, arguments: JSON.stringify(call.arguments ?? {}) },
+    })),
+  };
 }
 
 // OpenCode stores provider failures on assistant message.info.error rather
@@ -73,9 +115,13 @@ function initializeBridgePool() {
   for (let index = 0; index < bridgePoolSize(); index += 1) bridgePool.free.push(`opencode_bridge_${index}`);
 }
 
-async function acquireBridgeSlot(signal = undefined) {
+async function acquireBridgeSlot(signal = undefined, preferred = undefined) {
   initializeBridgePool();
   if (signal?.aborted) throw signal.reason || httpError("Request cancelled", 499);
+  if (preferred) {
+    const preferredIndex = bridgePool.free.indexOf(preferred);
+    if (preferredIndex >= 0) return bridgePool.free.splice(preferredIndex, 1)[0];
+  }
   if (bridgePool.free.length) return bridgePool.free.shift();
   return new Promise((resolve, reject) => {
     const waiter = { active: true, resolve: null };
@@ -153,7 +199,7 @@ function sanitizeToolName(name, seen = new Set()) {
   return candidate;
 }
 
-function clientToolMap(definitions, discovered = FALLBACK_TOOL_IDS) {
+function clientToolMap(definitions, discovered = []) {
   const available = new Set(discovered);
   const result = new Map();
   for (const name of definitions.keys()) {
@@ -177,36 +223,63 @@ function disableToolIds(discovered) {
 function mapToolInput(openCodeName, clientName, input, definition) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? { ...input } : {};
   const properties = definition?.parameters?.properties;
-  if (source.filePath !== undefined && source.path === undefined) source.path = source.filePath;
-  delete source.filePath;
-  if (clientName === "edit" && !Array.isArray(source.edits) && source.oldString !== undefined) {
-    if (properties?.edits !== undefined || !properties || Object.keys(properties).length === 0) {
-      source.edits = [{ oldText: source.oldString, newText: source.newString ?? "" }];
-    }
+  // Only translate legacy OpenCode names when the caller's schema does not
+  // already declare the original field. Otherwise the tool arguments must
+  // remain byte-for-byte in the caller's namespace.
+  if (
+    source.filePath !== undefined
+    && source.path === undefined
+    && properties?.path !== undefined
+    && properties?.filePath === undefined
+  ) {
+    source.path = source.filePath;
+    delete source.filePath;
   }
-  if (properties?.edits !== undefined || !properties || Object.keys(properties).length === 0) {
+  if (
+    clientName === "edit"
+    && !Array.isArray(source.edits)
+    && source.oldString !== undefined
+    && properties?.edits !== undefined
+    && properties?.oldString === undefined
+  ) {
+    source.edits = [{ oldText: source.oldString, newText: source.newString ?? "" }];
     delete source.oldString;
     delete source.newString;
   }
-  if (openCodeName === "glob" && clientName === "find" && source.pattern === undefined && source.glob !== undefined) {
+  if (
+    openCodeName === "glob"
+    && clientName === "find"
+    && source.pattern === undefined
+    && source.glob !== undefined
+    && properties?.pattern !== undefined
+    && properties?.glob === undefined
+  ) {
     source.pattern = source.glob;
+    delete source.glob;
   }
-  delete source.glob;
-
-  if (!properties || typeof properties !== "object") return source;
-  return Object.fromEntries(Object.entries(source).filter(([key]) => Object.hasOwn(properties, key)));
+  return source;
 }
 
-function decodeToolInput(state: any = {}) {
+interface ToolState extends JsonObject {
+  input?: unknown;
+  raw?: unknown;
+  arguments?: unknown;
+}
+interface DeltaOptions {
+  skipAccumulate?: boolean;
+  forceEmit?: boolean;
+}
+
+function decodeToolInput(state: ToolState = {}): JsonObject {
   const input = state.input;
   if (input && typeof input === "object" && !Array.isArray(input) && Object.keys(input).length > 0) {
-    return input;
+    return input as JsonObject;
   }
   for (const raw of [state.raw, state.arguments, state.input]) {
     if (typeof raw !== "string" || !raw.trim()) continue;
     try {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as JsonObject;
     } catch {
       // Some providers emit partial JSON while the tool is pending. The next
       // running/completed snapshot remains authoritative.
@@ -254,18 +327,116 @@ function createChatHandler({
   eventConnectTimeoutMs = 15_000,
 }) {
   const sessions = new Map();
+  const sessionLocks = new Map();
+  let lastSessionSweepAt = 0;
+
+  function discardSession(key, current) {
+    if (!current) return;
+    if (sessions.get(key) === current) sessions.delete(key);
+    if (current.id) void client.sessionDelete?.(current.id).catch(() => {});
+  }
+
+  function sweepSessions(force = false) {
+    const now = Date.now();
+    const maxEntries = sessionMaxEntries();
+    if (!force && now - lastSessionSweepAt < 60_000 && sessions.size <= maxEntries) return;
+    lastSessionSweepAt = now;
+    for (const [key, current] of sessions) {
+      if (now - current.lastUsedAt > sessionTtlMs()) discardSession(key, current);
+    }
+    if (sessions.size <= maxEntries) return;
+    const oldest = [...sessions.entries()]
+      .sort((left, right) => left[1].lastUsedAt - right[1].lastUsedAt)
+      .slice(0, sessions.size - maxEntries);
+    for (const [key, current] of oldest) discardSession(key, current);
+  }
 
   function sessionFor(key, model) {
+    sweepSessions();
     if (!key) return null;
     const current = sessions.get(key);
     if (!current || current.model !== model || Date.now() - current.lastUsedAt > sessionTtlMs()) {
-      if (current?.id) void client.sessionDelete?.(current.id).catch(() => {});
-      sessions.delete(key);
+      discardSession(key, current);
       return null;
     }
     current.lastUsedAt = Date.now();
     return current;
   }
+
+  function sessionInput(current, key, incomingMessages) {
+    const incomingFingerprints = messageFingerprints(incomingMessages);
+    if (!current) {
+      return { current: null, incomingFingerprints, messages: incomingMessages };
+    }
+
+    const previous = Array.isArray(current.inputFingerprints) ? current.inputFingerprints : [];
+    const exactReplay = previous.length === incomingFingerprints.length
+      && previous.every((fingerprint, index) => incomingFingerprints[index] === fingerprint);
+    if (exactReplay && current.lastResponse) {
+      return { current, incomingFingerprints, messages: [], replay: true };
+    }
+    const prefixMatches = previous.length <= incomingFingerprints.length
+      && previous.every((fingerprint, index) => incomingFingerprints[index] === fingerprint);
+    let cursor = previous.length;
+    const assistantMatches = Boolean(
+      current.assistantFingerprint
+      && cursor < incomingFingerprints.length
+      && incomingFingerprints[cursor] === current.assistantFingerprint,
+    );
+
+    // OpenAI clients normally replay the previous assistant response before
+    // appending the next user/tool message. OpenCode already owns that
+    // assistant message inside its session, so skip the echoed copy. If the
+    // prefix changed (branch, compaction, edit, or retry), start a fresh
+    // OpenCode session and replay the caller's complete canonical context once.
+    if (!prefixMatches || !assistantMatches) {
+      discardSession(key, current);
+      return { current: null, incomingFingerprints, messages: incomingMessages };
+    }
+    cursor += 1;
+    const messages = incomingMessages.slice(cursor);
+    if (!messages.length) {
+      // The caller may retry with the complete transcript, including the
+      // assistant response we already produced. Replay the stored response
+      // instead of issuing the same upstream turn a second time.
+      if (current.lastResponse) return { current, incomingFingerprints, messages: [], replay: true };
+      discardSession(key, current);
+      return { current: null, incomingFingerprints, messages: incomingMessages };
+    }
+    return { current, incomingFingerprints, messages };
+  }
+
+  function commitSession(key, sessionId, model, incomingFingerprints, assistantMessage, bridgeName = undefined, systemPrompt = undefined, lastResponse = undefined) {
+    if (!key || !sessionId) return;
+    sessions.set(key, {
+      id: sessionId,
+      model,
+      inputFingerprints: incomingFingerprints,
+      assistantFingerprint: messageFingerprint(assistantMessage),
+      bridgeName,
+      systemPrompt: typeof systemPrompt === "string" && systemPrompt ? systemPrompt : undefined,
+      lastResponse,
+      lastUsedAt: Date.now(),
+    });
+    sweepSessions(sessions.size > sessionMaxEntries());
+  }
+
+  async function withSessionLock(key, operation) {
+    if (!key) return operation();
+    const previous = sessionLocks.get(key) || Promise.resolve();
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const tail = previous.catch(() => {}).then(() => gate);
+    sessionLocks.set(key, tail);
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (sessionLocks.get(key) === tail) sessionLocks.delete(key);
+    }
+  }
+
   async function resolveModel(name) {
     const requested = name || defaultModel;
     if (requested.includes("/")) return selectModel(undefined, requested);
@@ -302,10 +473,14 @@ function createChatHandler({
   async function discoveredToolIds() {
     try {
       const discovered = await client.toolIds?.();
-      return Array.isArray(discovered) && discovered.length ? discovered : FALLBACK_TOOL_IDS;
+      if (!Array.isArray(discovered)) throw new Error("OpenCode returned an invalid tool catalog");
+      return discovered.filter((toolId) => typeof toolId === "string" && toolId);
     } catch (error) {
-      console.warn(`[machine] unable to discover OpenCode tools; using fallback list: ${error.message}`);
-      return FALLBACK_TOOL_IDS;
+      throw httpError(
+        `Unable to discover OpenCode tools; refusing request because remote tools cannot be disabled safely: ${error.message}`,
+        503,
+        { type: "tool_catalog_unavailable" },
+      );
     }
   }
 
@@ -313,9 +488,9 @@ function createChatHandler({
     return disableToolIds(await discoveredToolIds());
   }
 
-  async function createToolBridge(definitions) {
+  async function createToolBridge(definitions, preferredName = undefined) {
     if (!client.mcpAdd || !client.mcpDisconnect) return null;
-    const bridgeName = await acquireBridgeSlot();
+    const bridgeName = await acquireBridgeSlot(undefined, preferredName);
     const seen = new Set();
     const nameMap = new Map();
     const bridgeTools = [...definitions.values()].map((definition) => {
@@ -353,11 +528,72 @@ function createChatHandler({
     }
   }
 
-  async function handle(req, res, body) {
+  async function handleTurn(req, res, body, sessionKey) {
     const selected = await resolveModel(body.model);
     const model = selected.name;
-    const sessionKey = requestSessionKey(req, body);
-    const existingSession = sessionFor(sessionKey, model);
+    const inputPlan = sessionInput(
+      sessionFor(sessionKey, model),
+      sessionKey,
+      Array.isArray(body.messages) ? body.messages : [],
+    );
+    const existingSession = inputPlan.current;
+    if (inputPlan.replay && existingSession?.lastResponse) {
+      const replay = existingSession.lastResponse;
+      if (body.stream) {
+        res.writeHead(200, sseHeaders());
+        res.flushHeaders?.();
+        res.write(sseHeartbeat("machine-replay"));
+        if (replay.toolCalls?.length) {
+          res.write(`data: ${JSON.stringify({
+            id: `chatcmpl-${crypto.randomBytes(12).toString("hex")}`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [{ index: 0, delta: { role: "assistant", tool_calls: replay.toolCalls.map((call, index) => ({
+              index,
+              id: call.id,
+              type: "function",
+              function: { name: call.name, arguments: JSON.stringify(call.arguments ?? {}) },
+            })) }, finish_reason: null }],
+          })}\n\n`);
+          res.write(`data: ${JSON.stringify({
+            id: `chatcmpl-replay`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          })}\n\n`);
+        } else if (replay.text) {
+          res.write(`data: ${JSON.stringify({
+            id: `chatcmpl-replay`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [{ index: 0, delta: { role: "assistant", content: replay.text }, finish_reason: null }],
+          })}\n\n`);
+          res.write(`data: ${JSON.stringify({
+            id: `chatcmpl-replay`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          })}\n\n`);
+        }
+        if (replay.usage) {
+          res.write(`data: ${JSON.stringify({
+            id: `chatcmpl-replay`,
+            object: "chat.completion.chunk",
+            created: Math.floor(Date.now() / 1000),
+            model,
+            choices: [],
+            usage: toOpenAIUsage(replay.usage),
+          })}\n\n`);
+        }
+        return res.end("data: [DONE]\n\n");
+      }
+      if (replay.toolCalls?.length) return json(res, 200, toolCompletion(crypto.randomBytes(12).toString("hex"), model, replay.toolCalls, replay.usage));
+      return json(res, 200, completion(crypto.randomBytes(12).toString("hex"), model, replay.text || "", replay.usage?.inputTokens || 0, replay.usage?.outputTokens || 0, replay.usage));
+    }
     const discoveredTools = await discoveredToolIds();
     const definitions = applyToolChoice(
       clientToolDefinitions(body.tools ?? body.functions),
@@ -365,11 +601,7 @@ function createChatHandler({
     );
     const toolMap = clientToolMap(definitions, discoveredTools);
     const incomingMessages = Array.isArray(body.messages) ? body.messages : [];
-    const messagesForPrompt = existingSession && existingSession.messageCount < incomingMessages.length
-      ? incomingMessages.slice(existingSession.messageCount)
-      : existingSession && existingSession.messageCount === incomingMessages.length
-        ? incomingMessages.slice(-1)
-        : incomingMessages;
+    const messagesForPrompt = inputPlan.messages;
     const canonicalPrompt = renderOpenCodePrompt(messagesForPrompt);
     // Keep the caller's tools available on every request. Tool history is
     // represented in the prompt context; disabling tools based on message
@@ -388,7 +620,7 @@ function createChatHandler({
         if (!client.mcpAdd || !client.mcpDisconnect) {
           throw new Error("OpenCode MCP API is unavailable");
         }
-        toolBridge = await createToolBridge(definitions);
+        toolBridge = await createToolBridge(definitions, existingSession?.bridgeName);
         if (!toolBridge) throw new Error("OpenCode MCP tool bridge was not created");
       } catch (error) {
         // A native OpenCode tool runs in the machine's workspace. Falling
@@ -414,16 +646,21 @@ function createChatHandler({
     // Do not inject tool-specific instructions into the model prompt.  MCP
     // exposes the caller's schemas as ordinary tools; the upstream client
     // system/developer messages are the only system content we forward.
-    const systemPrompt = canonicalPrompt.system || undefined;
+    // `system` on OpenCode's prompt endpoint is per prompt, not a durable
+    // conversation message. Preserve and resend the caller's original system
+    // content on resumed turns; never synthesize or replace it.
+    const systemPrompt = canonicalPrompt.system || existingSession?.systemPrompt || undefined;
     const payload = {
       parts: [{ type: "text", text: canonicalPrompt.text }],
       model: selected.ref,
-      // OpenCode's default agent can be changed by the server configuration
-      // (for example to `plan`), which intentionally avoids execution tools.
-      // This bridge is a model-only frontend for the caller's local tools, so
-      // use the execution-capable build agent unless the operator explicitly
-      // overrides it on the machine.
-      agent: process.env.OPENCODE_AGENT || "build",
+      // Do not choose an OpenCode agent on behalf of the caller. Selecting
+      // `build` here injects that agent's evolving system prompt (workspace,
+      // skills, tool policy, etc.) into every request and makes cache prefixes
+      // unstable. The OpenCode server's own configured default remains in
+      // control; an operator may opt in to a specific agent per machine.
+      ...(process.env.OPENCODE_AGENT?.trim()
+        ? { agent: process.env.OPENCODE_AGENT.trim() }
+        : {}),
       // OpenCode converts message-level `tools: { read: true }` into an allow
       // permission and overwrites the session's `ask` rule. Omit `tools` while
       // capturing client calls so execution pauses at `permission.asked`.
@@ -444,8 +681,15 @@ function createChatHandler({
     };
     const id = crypto.randomBytes(12).toString("hex");
     const eventController = new AbortController();
+    // Do not abort a persistent OpenCode session after every successful turn.
+    // OpenCode records that abort as an assistant failure, so the next
+    // prompt on the same session can surface an alternating "Aborted" error.
+    // Remote abort is reserved for cancellation, timeout, errors, and
+    // captured client-tool turns that must stop the model.
+    let remoteSessionNeedsAbort = false;
     const abortOnClientClose = () => {
       if (!eventController.signal.aborted) {
+        remoteSessionNeedsAbort = true;
         eventController.abort(Object.assign(new Error("Client connection closed"), { name: "AbortError" }));
       }
     };
@@ -479,11 +723,21 @@ function createChatHandler({
     const asyncLifecycle = typeof client.promptAsync === "function" && typeof client.sessionMessages === "function";
     let asyncTurn = asyncLifecycle;
 
+    const finishCapturedToolTurn = (reason) => {
+      remoteSessionNeedsAbort = true;
+      // The legacy synchronous message endpoint does not return until the
+      // remote turn is aborted. The async endpoint already returned after
+      // enqueueing the prompt, so aborting here would also cancel the message
+      // snapshot needed to finalize the local tool call.
+      if (asyncTurn) terminalResolve(reason);
+      else eventController.abort();
+    };
+
     const markData = () => {
       if (!firstDataAt) firstDataAt = Date.now();
       lastDataAt = Date.now();
     };
-    const sendDelta = (text, options: any = {}) => {
+    const sendDelta = (text: string, options: DeltaOptions = {}) => {
       if (!text) return;
       markData();
       if (!options.skipAccumulate) streamedText += text;
@@ -555,12 +809,12 @@ function createChatHandler({
           + `permission=${permission ? "yes" : "no"}: ${validation.error.message}`,
         );
         if (!permission) {
-          eventController.abort();
+          finishCapturedToolTurn("invalid-tool");
           return;
         }
         void rejectPermission(sessionId, permission.id)
           .catch((error) => console.warn(`[machine-tools] unable to reject invalid remote execution: ${error.message}`))
-          .finally(() => eventController.abort());
+          .finally(() => finishCapturedToolTurn("invalid-tool"));
         return;
       }
       capturedToolCalls.set(callID, {
@@ -573,9 +827,9 @@ function createChatHandler({
       if (permission) {
         void rejectPermission(sessionId, permission.id)
           .catch((error) => console.warn(`[machine-tools] unable to reject remote execution: ${error.message}`))
-          .finally(() => eventController.abort());
+          .finally(() => finishCapturedToolTurn("tool-captured"));
       } else {
-        eventController.abort();
+        finishCapturedToolTurn("tool-captured");
       }
     };
     const captureTool = (part) => {
@@ -780,16 +1034,12 @@ function createChatHandler({
     const sendStreamUsage = (usage) => {
       if (!body.stream || !usage || res.writableEnded) return;
       res.write(`data: ${JSON.stringify({
-        id: `usage-${id}`,
-        object: "bridge.usage",
-        usage: {
-          prompt_tokens: usage.inputTokens,
-          completion_tokens: usage.outputTokens,
-          total_tokens: usage.totalTokens,
-          reasoning_tokens: usage.reasoningTokens,
-          cache_read_input_tokens: usage.cacheReadTokens,
-          cache_creation_input_tokens: usage.cacheWriteTokens,
-        },
+        id: `chatcmpl-${id}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model,
+        choices: [],
+        usage: toOpenAIUsage(usage),
       })}\n\n`);
     };
     const sendStreamTool = (toolCalls) => {
@@ -849,26 +1099,48 @@ function createChatHandler({
       const session = existingSession
         || await createSession(clientTools && !toolBridge ? sessionPermission(toolMap) : undefined);
       sessionId = session.id;
-      persistentSession = Boolean(sessionKey);
-      if (persistentSession) {
-        sessions.set(sessionKey, {
-          id: sessionId,
-          model,
-          messageCount: incomingMessages.length,
-          lastUsedAt: Date.now(),
-        });
+      if (sessionKey) {
+        console.log(
+          `[machine-session] model=${model} session=${sessionId} reused=${Boolean(existingSession)} `
+          + `inputMessages=${incomingMessages.length} forwardedMessages=${messagesForPrompt.length}`,
+        );
       }
       // Provider errors are persisted on the assistant message, but some
       // OpenCode releases never publish session.idle/session.error for a
       // failed provider turn. Poll the lightweight message snapshot so a
       // quota error is surfaced immediately instead of waiting for a timeout.
       if (asyncLifecycle) {
+        const previousErrors = new Set();
+        if (existingSession) {
+          try {
+            const before = await client.sessionMessages(session.id, eventController.signal);
+            const entries = Array.isArray(before) ? before : (Array.isArray(before?.data) ? before.data : []);
+            for (const entry of entries) {
+              if (entry?.info?.role === "assistant" && entry.info.error) {
+                previousErrors.add(openCodeErrorIdentity(entry));
+              }
+            }
+          } catch {
+            if (eventController.signal.aborted) throw eventController.signal.reason;
+          }
+        }
         errorWatcherPromise = (async () => {
           while (!eventController.signal.aborted) {
             try {
               const snapshot = await client.sessionMessages(session.id, eventController.signal);
               const entries = Array.isArray(snapshot) ? snapshot : (Array.isArray(snapshot?.data) ? snapshot.data : []);
-              const failed = entries.find((entry) => entry?.info?.role === "assistant" && entry.info.error);
+              let failed = null;
+              for (let index = entries.length - 1; index >= 0; index -= 1) {
+                const entry = entries[index];
+                if (
+                  entry?.info?.role === "assistant"
+                  && entry.info.error
+                  && !previousErrors.has(openCodeErrorIdentity(entry))
+                ) {
+                  failed = entry;
+                  break;
+                }
+              }
               if (failed?.info?.error) {
                 terminalResolve({ error: normalizeOpenCodeError(failed.info.error) });
                 return;
@@ -877,7 +1149,7 @@ function createChatHandler({
               if (eventController.signal.aborted) return;
             }
             await new Promise((resolve) => {
-              const timer = setTimeout(resolve, 500);
+              const timer = setTimeout(resolve, 1_000);
               timer.unref?.();
             });
           }
@@ -886,14 +1158,19 @@ function createChatHandler({
       if (body.stream) {
         res.writeHead(200, sseHeaders());
         res.flushHeaders?.();
-        const heartbeatFrame = sseDataHeartbeat("machine-keep-alive");
+        const heartbeatFrame = sseHeartbeat("machine-keep-alive");
+        const heartbeatComment = sseHeartbeat("machine-keep-alive", false);
         res.write(heartbeatFrame);
         heartbeat = setInterval(() => {
-          if (!res.writableEnded) res.write(heartbeatFrame);
+          if (!res.writableEnded) res.write(heartbeatComment);
         }, SSE_HEARTBEAT_INTERVAL_MS);
+        heartbeat.unref?.();
       }
       firstDataTimer = setTimeout(() => {
-        if (!firstDataAt) eventController.abort();
+        if (!firstDataAt) {
+          remoteSessionNeedsAbort = true;
+          eventController.abort();
+        }
       }, firstDataTimeoutMs);
       firstDataTimer.unref?.();
 
@@ -928,6 +1205,7 @@ function createChatHandler({
           // while the completed arguments are already available here.
           const result = await hydrateToolInputsWithRetry(session.id);
           const entries = Array.isArray(result) ? result : (Array.isArray(result?.data) ? result.data : []);
+          if (invalidToolError) throw invalidToolError;
           if (capturedToolCalls.size === 0 || !clientTools) {
             message = entries.filter((entry) => entry?.info?.role === "assistant").at(-1)
               || entries.at(-1)
@@ -960,15 +1238,19 @@ function createChatHandler({
       clearTimeout(firstDataTimer);
 
       const toolCalls = [...capturedToolCalls.values()];
-      const turnUsage = usageFromMessage(message) || observedUsage;
+      const turnUsage = mergeTokenUsage(usageFromMessage(message), observedUsage);
       if (toolCalls.length > 0) {
-        if (sessionKey) {
-          const stored = sessions.get(sessionKey);
-          if (stored) {
-            stored.messageCount = incomingMessages.length;
-            stored.lastUsedAt = Date.now();
-          }
-        }
+        commitSession(
+          sessionKey,
+          sessionId,
+          model,
+          inputPlan.incomingFingerprints,
+          assistantMessageForTools(toolCalls),
+          toolBridge?.name || existingSession?.bridgeName,
+          systemPrompt,
+          { toolCalls, usage: turnUsage },
+        );
+        persistentSession = Boolean(sessionKey);
         console.log(`[machine-tools] model=${model} session=${sessionId} tools=${toolCalls.map((call) => call.name).join(",")} events=${eventCount}`);
         if (body.stream) {
           sendStreamUsage(turnUsage);
@@ -999,14 +1281,23 @@ function createChatHandler({
         sendStreamDone();
       }
       else json(res, 200, completion(id, model, streamedText, turnUsage?.inputTokens || 0, turnUsage?.outputTokens || 0, turnUsage));
+      commitSession(
+        sessionKey,
+        sessionId,
+        model,
+        inputPlan.incomingFingerprints,
+        assistantMessageForText(streamedText),
+        toolBridge?.name || existingSession?.bridgeName,
+        systemPrompt,
+        { text: streamedText, usage: turnUsage },
+      );
+      persistentSession = Boolean(sessionKey);
+    } catch (error) {
+      remoteSessionNeedsAbort = true;
       if (sessionKey) {
         const stored = sessions.get(sessionKey);
-        if (stored) {
-          stored.messageCount = incomingMessages.length;
-          stored.lastUsedAt = Date.now();
-        }
+        if (stored?.id === sessionId) discardSession(sessionKey, stored);
       }
-    } catch (error) {
       if (error?.name === "AbortError" && capturedToolCalls.size === 0 && !streamedText) error = httpError("OpenCode first model data timed out", 504);
       const message = error?.data?.message || error?.message || "upstream error";
       const status = Number(error?.status || error?.data?.statusCode);
@@ -1023,7 +1314,7 @@ function createChatHandler({
         }
       }
     } finally {
-      if (sessionId && client.sessionAbort) {
+      if (remoteSessionNeedsAbort && sessionId && client.sessionAbort) {
         await client.sessionAbort(sessionId).catch(() => {});
       }
       eventController.abort();
@@ -1047,6 +1338,18 @@ function createChatHandler({
     }
   }
 
+  async function handle(req, res, body) {
+    validateMessages(body?.messages);
+    const context = requestSessionContext(req, body);
+    // Pi normally sends prompt_cache_key rather than x-session-id. OpenCode
+    // derives its provider cache key from the OpenCode session ID, so use the
+    // cache key as a *candidate* session slot too. sessionInput() still
+    // fingerprint-checks the complete transcript and discards the slot on a
+    // branch/mismatch; this never merges unrelated conversations.
+    const sessionKey = context.affinityKey || context.cacheKey;
+    return withSessionLock(sessionKey, () => handleTurn(req, res, body, sessionKey));
+  }
+
   return { disabledTools, handle, resolveModel };
 }
 
@@ -1058,6 +1361,8 @@ module.exports = {
   mapToolInput,
   clientToolContract,
   sanitizeClientToolArguments,
+  messageFingerprint,
+  validateMessages,
   sessionPermission,
   toolCompletion,
   validateClientToolArguments,

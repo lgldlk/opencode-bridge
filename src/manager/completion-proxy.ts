@@ -1,33 +1,51 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const { once } = require("node:events");
-const { json, sseHeaders, sseDataHeartbeat, SSE_HEARTBEAT_INTERVAL_MS } = require("../shared/http.ts");
+const { json, sseHeaders, sseHeartbeat, SSE_HEARTBEAT_INTERVAL_MS } = require("../shared/http.ts");
+const { machineSessionHeaders, requestSessionContext } = require("../shared/session.ts");
 const { normalizeTokenUsage } = require("../shared/usage.ts");
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { MachineConfig, TokenUsage } from "../shared/types.ts";
+import type { SessionBody, SessionContext } from "../shared/session.ts";
 
-function retryableStatus(status) {
+interface CompletionRegistry {
+  candidates: (model?: string, sessionKey?: string | null) => MachineConfig[];
+  nextCooldownMs: () => number;
+  startUsageRequest: (machine: MachineConfig, model?: string, stream?: boolean) => string;
+  finishUsageRequest: (id: string, value: unknown, status?: string) => boolean;
+  fetchMachine: (machine: MachineConfig, path: string, options?: RequestInit, timeoutMs?: number) => Promise<Response>;
+  markHealthy: (machine: MachineConfig) => void;
+  markFailure: (machine: MachineConfig, error: unknown) => void;
+  cooldown: (machine: MachineConfig) => Promise<string>;
+  rememberSessionMachine?: (key: string | null, machine: MachineConfig) => void;
+}
+interface CompletionBody extends SessionBody {
+  model?: string;
+  stream?: boolean;
+}
+
+function retryableStatus(status: number): boolean {
   return status === 502 || status === 503 || status === 504;
 }
 
-function rateLimitHeaders(registry) {
+function rateLimitHeaders(registry: CompletionRegistry): Record<string, string> {
   const remainingMs = registry.nextCooldownMs();
   return remainingMs ? { "retry-after": String(Math.max(1, Math.ceil(remainingMs / 1000))) } : {};
 }
 
-function requestSessionKey(req, body) {
-  const headers = req?.headers || {};
-  const explicit = headers["x-session-id"] || headers["x-conversation-id"]
-    || headers["x-opencode-session-id"] || body?.session_id || body?.conversation_id
-    || body?.metadata?.session_id || body?.metadata?.conversation_id;
-  if (typeof explicit === "string" && explicit.trim()) return explicit.trim().slice(0, 256);
-  return null;
-}
-
-function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs = 12_000, firstDataTimeoutMs = 900_000, idleDataTimeoutMs = firstDataTimeoutMs }) {
-  async function proxy(req, res, body) {
+function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs = 12_000, firstDataTimeoutMs = 900_000, idleDataTimeoutMs = firstDataTimeoutMs }: { registry: CompletionRegistry; requestTimeoutMs: number; upstreamConnectTimeoutMs?: number; firstDataTimeoutMs?: number; idleDataTimeoutMs?: number }) {
+  async function proxy(req: IncomingMessage, res: ServerResponse, body: CompletionBody): Promise<unknown> {
     const model = body.model;
-    const sessionKey = requestSessionKey(req, body);
+    const sessionContext = requestSessionContext(req, body);
+    const sessionKey = sessionContext.routingKey;
+    const traceId = sessionContext.requestId || crypto.randomUUID();
     const pool = registry.candidates(model, sessionKey);
-    console.log(`[request] stream=${body.stream === true} model=${model || "<default>"} bytes=${req.headers["content-length"] || "?"} remote=${req.socket.remoteAddress || "?"}`);
+    console.log(
+      `[request] id=${traceId} stream=${body.stream === true} `
+      + `model=${model || "<default>"} bytes=${req.headers["content-length"] || "?"} `
+      + `affinity=${sessionContext.affinityKey || "-"} cache=${sessionContext.cacheKey || "-"}`,
+    );
     if (!pool.length) {
       const headers = rateLimitHeaders(registry);
       if (Object.keys(headers).length) {
@@ -42,12 +60,12 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
     }
     const payload = JSON.stringify(body);
     return body.stream === true
-      ? proxyStream(req, res, pool, payload, model)
-      : proxyJson(res, pool, payload, model);
+      ? proxyStream(req, res, pool, payload, model, sessionContext, traceId)
+      : proxyJson(res, pool, payload, model, sessionContext, traceId);
   }
 
-  async function proxyJson(res, pool, payload, model) {
-    let lastError;
+  async function proxyJson(res: ServerResponse, pool: MachineConfig[], payload: string, model: string | undefined, sessionContext: SessionContext, traceId: string): Promise<unknown> {
+    let lastError: Error | undefined;
     let rateLimited = null;
     let otherFailure = false;
     for (const machine of pool) {
@@ -55,14 +73,22 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
       try {
         const response = await registry.fetchMachine(machine, "/v1/chat/completions", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            "x-client-request-id": traceId,
+            ...machineSessionHeaders(sessionContext),
+          },
           body: payload,
         });
         if (response.ok) {
           registry.markHealthy(machine);
+          // Pi commonly supplies only prompt_cache_key. routingKey includes
+          // that cache partition, while affinityKey does not. Remember the
+          // actual successful failover target for either form.
+          registry.rememberSessionMachine?.(sessionContext.routingKey, machine);
           res.writeHead(response.status, { "content-type": response.headers.get("content-type") || "application/json" });
           const text = await response.text();
-          let value = null;
+          let value: { usage?: unknown } | null = null;
           try {
             value = text ? JSON.parse(text) : null;
           } catch { /* preserve non-JSON upstream responses */ }
@@ -101,7 +127,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
     return json(res, 503, { error: { message: lastError?.message || "All machines failed", type: "service_unavailable" } });
   }
 
-  function classifySseBlock(block) {
+  function classifySseBlock(block: string): { model: boolean; done: boolean; heartbeat: boolean; internalUsage?: boolean; usage?: TokenUsage | null; error?: string; errorType?: string; errorCode?: number } {
     const data = block.split(/\r?\n/)
       .filter((line) => line.startsWith("data:"))
       .map((line) => line.slice(5).trim())
@@ -112,15 +138,10 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
       const value = JSON.parse(data);
       const heartbeat = typeof value?.id === "string" && value.id.startsWith("sse-");
       const internalUsage = value?.object === "bridge.usage";
-      const model = !heartbeat && Array.isArray(value?.choices) && value.choices.some((choice) => {
-        if (choice?.finish_reason) return true;
-        const delta = choice?.delta || {};
-        return (typeof delta.content === "string" && delta.content.length > 0)
-          || (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0)
-          || (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0)
-          || (delta.function_call && typeof delta.function_call === "object"
-            && Object.keys(delta.function_call).length > 0);
-      });
+      // Any non-heartbeat OpenAI choice frame is real upstream data, including
+      // role-only/empty deltas and finish frames. Do not drop those fields just
+      // because they carry no text; clients use them for tool and stream state.
+      const model = !heartbeat && Array.isArray(value?.choices) && value.choices.length > 0;
       return {
         model,
         done: false,
@@ -136,32 +157,33 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
     }
   }
 
-  async function proxyStream(req, res, pool, payload, model) {
+  async function proxyStream(req: IncomingMessage, res: ServerResponse, pool: MachineConfig[], payload: string, model: string | undefined, sessionContext: SessionContext, traceId: string): Promise<void> {
     res.writeHead(200, sseHeaders());
     res.flushHeaders?.();
     let closed = false;
-    let activeController = null;
+    let activeController: AbortController | null = null;
     let upstreamDone = false;
-    const heartbeatFrame = sseDataHeartbeat("manager-keep-alive");
-    // Use a valid empty OpenAI chunk: some proxies buffer SSE comments and
-    // leave the client waiting even though the TCP connection is alive.
+    const heartbeatFrame = sseHeartbeat("manager-keep-alive");
+    const heartbeatComment = sseHeartbeat("manager-keep-alive", false);
+    // Send a padded SSE comment. It keeps intermediary buffers flushing
+    // without becoming an OpenAI message/response ID in the client.
     res.write(heartbeatFrame);
     const heartbeat = setInterval(() => {
-      if (!closed && !res.writableEnded) res.write(heartbeatFrame);
+      if (!closed && !res.writableEnded) res.write(heartbeatComment);
     }, SSE_HEARTBEAT_INTERVAL_MS);
     heartbeat.unref?.();
     const onClose = () => {
-      if (!closed) console.log(`[stream] client-closed model=${model || "<default>"}`);
+      if (!closed) console.log(`[stream] id=${traceId} client-closed model=${model || "<default>"}`);
       closed = true;
       activeController?.abort();
       clearInterval(heartbeat);
     };
     req.once("aborted", onClose);
     res.once("close", onClose);
-    const writeSse = (value) => {
+    const writeSse = (value: unknown): void => {
       if (!closed && !res.writableEnded) res.write(`data: ${typeof value === "string" ? value : JSON.stringify(value)}\n\n`);
     };
-    const writeChunk = async (chunk) => {
+    const writeChunk = async (chunk: string | Uint8Array): Promise<boolean> => {
       if (closed || res.writableEnded) return false;
       if (res.write(chunk)) return true;
       // Do not truncate an SSE response when the client socket applies backpressure.
@@ -175,7 +197,7 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
       res.removeListener("close", onClose);
     };
 
-    console.log(`[stream] headers-sent model=${model || "<default>"} machines=${pool.map((item) => item.id).join(",")}`);
+    console.log(`[stream] id=${traceId} headers-sent model=${model || "<default>"} machines=${pool.map((item) => item.id).join(",")}`);
     let lastError;
     let rateLimited = null;
     let otherFailure = false;
@@ -189,12 +211,17 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
         try {
           const response = await registry.fetchMachine(machine, "/v1/chat/completions", {
             method: "POST",
-            headers: { "content-type": "application/json", accept: "text/event-stream" },
+            headers: {
+              "content-type": "application/json",
+              accept: "text/event-stream",
+              "x-client-request-id": traceId,
+              ...machineSessionHeaders(sessionContext),
+            },
             body: payload,
             signal: activeController.signal,
           }, requestTimeoutMs);
           clearTimeout(connectTimer);
-          console.log(`[stream] machine=${machine.id} headers=${response.status} after=${Date.now()}`);
+          console.log(`[stream] id=${traceId} machine=${machine.id} headers=${response.status} attempt=${pool.indexOf(machine) + 1}`);
           if (response.ok) {
             registry.markHealthy(machine);
             if (!response.body) {
@@ -268,7 +295,21 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
               if (closed) await reader.cancel().catch(() => {});
               reader.releaseLock();
             }
-            console.log(`[stream] machine=${machine.id} ended done=${machineDone} modelData=${machineSeenModelData} timedOut=${streamTimedOut} closed=${closed}`);
+            const outcome = closed
+              ? "client_closed"
+              : streamTimedOut
+                ? "timeout"
+                : machineSeenModelData
+                  ? "success"
+                  : rateLimited
+                    ? "rate_limited"
+                    : machineDone
+                      ? "no_model_data"
+                      : "upstream_closed";
+            console.log(
+              `[stream] id=${traceId} machine=${machine.id} ended outcome=${outcome} `
+              + `done=${machineDone} modelData=${machineSeenModelData} timedOut=${streamTimedOut} closed=${closed}`,
+            );
             registry.finishUsageRequest(requestId, observedUsage, closed ? "client_closed" : streamTimedOut ? "timeout" : machineSeenModelData ? "success" : rateLimited ? "rate_limited" : "error");
             if (!machineSeenModelData && !closed) {
               lastError ||= new Error(streamTimedOut
@@ -281,6 +322,9 @@ function completionProxy({ registry, requestTimeoutMs, upstreamConnectTimeoutMs 
             }
             if (streamTimedOut && machineSeenModelData && !closed) {
               writeSse({ error: { message: "Upstream SSE idle timeout", type: "upstream_timeout" } });
+            }
+            if (machineSeenModelData && !closed) {
+              registry.rememberSessionMachine?.(sessionContext.routingKey, machine);
             }
             upstreamDone = machineDone;
             return finish();

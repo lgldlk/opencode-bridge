@@ -4,6 +4,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { DatabaseSync } = require("node:sqlite");
+import type { MachineConfig, TokenUsage, UsageRequestPage, UsageSummary } from "../shared/types.ts";
+type SqliteRow = Record<string, unknown>;
+type UsageValue = Partial<TokenUsage> & { requests?: unknown; lastRequestAt?: unknown; byModel?: Record<string, unknown> };
+type UsageAggregate = Pick<UsageSummary, "requests" | "inputTokens" | "outputTokens" | "reasoningTokens" | "cacheReadTokens" | "cacheWriteTokens" | "totalTokens"> & { [key: string]: number };
 
 const TOKEN_FIELDS = [
   "inputTokens",
@@ -14,12 +18,20 @@ const TOKEN_FIELDS = [
   "totalTokens",
 ];
 
-function nonNegativeInteger(value) {
+function nonNegativeInteger(value: unknown): number {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.floor(number) : 0;
 }
 
-function createUsageStore({ dbPath, legacyUsage = undefined }) {
+function createUsageStore({ dbPath, legacyUsage = undefined }: { dbPath: string; legacyUsage?: Record<string, unknown> }): {
+  close: () => void;
+  finish: (requestId: string, value: Partial<TokenUsage> | null | undefined, status?: string, completedAt?: string) => boolean;
+  listRequests: (options?: { days?: number; machineId?: string; limit?: number; offset?: number }) => UsageRequestPage;
+  read: (machineId: string, days?: number) => UsageSummary;
+  record: (machineId: string, model: string | undefined, value: Partial<TokenUsage>) => Partial<TokenUsage> | null;
+  start: (machineId: string, model?: string, stream?: boolean, requestedAt?: string) => string;
+  summary: (machineList: MachineConfig[], days?: number) => UsageSummary & { machines: Array<MachineConfig & UsageSummary>; };
+} {
   if (!dbPath) throw new Error("usage db path is required");
   fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
   const db = new DatabaseSync(dbPath);
@@ -141,7 +153,7 @@ function createUsageStore({ dbPath, legacyUsage = undefined }) {
       last_request_at = excluded.last_request_at
   `);
 
-  function rowToUsage(row) {
+  function rowToUsage(row: SqliteRow | null | undefined): UsageSummary {
     if (!row) return { inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0, requests: 0, lastRequestAt: null };
     return {
       inputTokens: Number(row.input_tokens) || 0,
@@ -151,23 +163,23 @@ function createUsageStore({ dbPath, legacyUsage = undefined }) {
       cacheWriteTokens: Number(row.cache_write_tokens) || 0,
       totalTokens: Number(row.total_tokens) || 0,
       requests: Number(row.requests) || 0,
-      lastRequestAt: row.last_request_at || null,
+      lastRequestAt: row.last_request_at ? String(row.last_request_at) : null,
     };
   }
 
-  function modelRows(machineId) {
-    return selectModels.all(machineId).map((row) => ({ model: row.model, ...rowToUsage(row) }));
+  function modelRows(machineId: string): Array<{ model: string } & UsageSummary> {
+    return (selectModels.all(machineId) as SqliteRow[]).map((row) => ({ model: String(row.model || ""), ...rowToUsage(row) }));
   }
 
-  function read(machineId, days = 30) {
+  function read(machineId: string, days = 30): UsageSummary {
     const total = rowToUsage(selectTotal.get(machineId));
     const byModel = Object.fromEntries(modelRows(machineId).map(({ model, ...value }) => [model, value]));
     const since = new Date(Date.now() - Math.max(1, Number(days) || 30) * 86_400_000).toISOString().slice(0, 10);
-    const daily = selectDaily.all(machineId, since).map((row) => ({ day: row.usage_day, ...rowToUsage(row) }));
+    const daily = (selectDaily.all(machineId, since) as SqliteRow[]).map((row) => ({ day: String(row.usage_day || ""), ...rowToUsage(row) }));
     return { ...total, byModel, daily };
   }
 
-  function record(machineId, model, value) {
+  function record(machineId: string, model: string | undefined, value: Partial<TokenUsage>) {
     if (!machineId || !value) return null;
     const usage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, nonNegativeInteger(value[field])]));
     const now = new Date().toISOString();
@@ -176,13 +188,13 @@ function createUsageStore({ dbPath, legacyUsage = undefined }) {
     return usage;
   }
 
-  function start(machineId, model, stream = false, requestedAt = new Date().toISOString()) {
+  function start(machineId: string, model?: string, stream = false, requestedAt = new Date().toISOString()): string {
     const id = crypto.randomUUID();
     insertRequest.run(id, machineId, model ? String(model).slice(0, 256) : null, stream ? 1 : 0, requestedAt);
     return id;
   }
 
-  function finish(requestId, value, status = "success", completedAt = new Date().toISOString()) {
+  function finish(requestId: string, value: Partial<TokenUsage> | null | undefined, status = "success", completedAt = new Date().toISOString()): boolean {
     const row = selectRequest.get(requestId);
     if (!row || row.completed_at) return false;
     const usage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, nonNegativeInteger(value?.[field])]));
@@ -206,20 +218,20 @@ function createUsageStore({ dbPath, legacyUsage = undefined }) {
     return true;
   }
 
-  function listRequests({ days = 30, machineId = "", limit = 100, offset = 0 } = {}) {
+  function listRequests({ days = 30, machineId = "", limit = 100, offset = 0 }: { days?: number; machineId?: string; limit?: number; offset?: number } = {}): UsageRequestPage {
     const safeDays = Math.max(1, Number(days) || 30);
     const since = new Date(Date.now() - safeDays * 86_400_000).toISOString();
     const safeLimit = Math.min(500, Math.max(1, Math.floor(Number(limit) || 100)));
     const safeOffset = Math.max(0, Math.floor(Number(offset) || 0));
     const filter = machineId ? String(machineId).slice(0, 256) : "";
-    const rows = listRequestsStatement.all(since, filter, filter, safeLimit, safeOffset).map((row) => ({
-      id: row.id,
-      machineId: row.machine_id,
-      model: row.model,
+    const rows = (listRequestsStatement.all(since, filter, filter, safeLimit, safeOffset) as SqliteRow[]).map((row) => ({
+      id: String(row.id || ""),
+      machineId: String(row.machine_id || ""),
+      model: row.model ? String(row.model) : null,
       stream: Boolean(row.stream),
-      status: row.status,
-      requestedAt: row.requested_at,
-      completedAt: row.completed_at || null,
+      status: String(row.status || ""),
+      requestedAt: String(row.requested_at || ""),
+      completedAt: row.completed_at ? String(row.completed_at) : null,
       inputTokens: Number(row.input_tokens) || 0,
       outputTokens: Number(row.output_tokens) || 0,
       reasoningTokens: Number(row.reasoning_tokens) || 0,
@@ -227,21 +239,22 @@ function createUsageStore({ dbPath, legacyUsage = undefined }) {
       cacheWriteTokens: Number(row.cache_write_tokens) || 0,
       totalTokens: Number(row.total_tokens) || 0,
     }));
-    const total = Number(countRequestsStatement.get(since, filter, filter)?.count) || 0;
+    const countRow = countRequestsStatement.get(since, filter, filter) as SqliteRow | undefined;
+    const total = Number(countRow?.count) || 0;
     return { data: rows, total, days: safeDays, limit: safeLimit, offset: safeOffset };
   }
 
-  function migrateLegacy(input) {
+  function migrateLegacy(input: Record<string, unknown> | undefined): void {
     if (!input || typeof input !== "object") return;
     for (const [machineId, rawValue] of Object.entries(input)) {
-      const value: any = rawValue;
+      const value = rawValue && typeof rawValue === "object" ? rawValue as Record<string, unknown> : {};
       if (!value || selectTotal.get(machineId)) continue;
       const usage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, nonNegativeInteger(value[field])]));
       const requests = nonNegativeInteger(value.requests);
       if (!requests && !usage.totalTokens && !usage.inputTokens && !usage.outputTokens) continue;
       upsertTotal.run(machineId, requests, usage.inputTokens, usage.outputTokens, usage.reasoningTokens, usage.cacheReadTokens, usage.cacheWriteTokens, usage.totalTokens, value.lastRequestAt || null);
       for (const [model, rawModelValue] of Object.entries(value.byModel || {})) {
-        const modelValue: any = rawModelValue;
+        const modelValue = rawModelValue && typeof rawModelValue === "object" ? rawModelValue as Record<string, unknown> : {};
         const modelUsage = Object.fromEntries(TOKEN_FIELDS.map((field) => [field, nonNegativeInteger(modelValue?.[field])]));
         upsertModel.run(machineId, String(model).slice(0, 256), nonNegativeInteger(modelValue?.requests), modelUsage.inputTokens, modelUsage.outputTokens, modelUsage.reasoningTokens, modelUsage.cacheReadTokens, modelUsage.cacheWriteTokens, modelUsage.totalTokens, modelValue?.lastRequestAt || value.lastRequestAt || null);
       }
@@ -250,16 +263,20 @@ function createUsageStore({ dbPath, legacyUsage = undefined }) {
 
   migrateLegacy(legacyUsage);
 
-  function summary(machineList, days = 30) {
+  function summary(machineList: MachineConfig[], days = 30): UsageSummary & { machines: Array<MachineConfig & UsageSummary> } {
     const since = new Date(Date.now() - Math.max(1, Number(days) || 30) * 86_400_000).toISOString().slice(0, 10);
-    const requestTotals = new Map<string, any>(requestTotalsStatement.all().map((row) => [String(row.machine_id), rowToUsage(row)]));
-    const machines = machineList.map((machine) => ({ id: machine.id, name: machine.name || machine.id, ...(requestTotals.get(machine.id) || rowToUsage(null)), byModel: Object.fromEntries(modelRows(machine.id).map(({ model, ...value }) => [model, value])), daily: selectDaily.all(machine.id, since).map((row) => ({ day: row.usage_day, ...rowToUsage(row) })) }));
-    const totals = { requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
-    for (const machine of machines) for (const key of Object.keys(totals)) totals[key] += Number(machine[key]) || 0;
+    const requestTotals = new Map<string, UsageSummary>((requestTotalsStatement.all() as SqliteRow[]).map((row) => [String(row.machine_id), rowToUsage(row)]));
+    const machines = machineList.map((machine) => ({ ...machine, id: machine.id, name: machine.name || machine.id, ...(requestTotals.get(machine.id) || rowToUsage(null)), byModel: Object.fromEntries(modelRows(machine.id).map(({ model, ...value }) => [model, value])), daily: (selectDaily.all(machine.id, since) as SqliteRow[]).map((row) => ({ day: String(row.usage_day || ""), ...rowToUsage(row) })) }));
+    const totals: UsageAggregate = { requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+    for (const machine of machines) {
+      const usage = machine as unknown as Record<string, unknown>;
+      for (const key of Object.keys(totals)) totals[key] += Number(usage[key]) || 0;
+    }
     const dailyMap = new Map();
     for (const machine of machines) for (const item of machine.daily) {
-      const current = dailyMap.get(item.day) || { day: item.day, requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
-      for (const key of ["requests", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "totalTokens"]) current[key] += item[key] || 0;
+      const current: UsageAggregate & { day: string } = dailyMap.get(item.day) || { day: item.day, requests: 0, inputTokens: 0, outputTokens: 0, reasoningTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, totalTokens: 0 };
+      const usage = item as unknown as Record<string, unknown>;
+      for (const key of ["requests", "inputTokens", "outputTokens", "reasoningTokens", "cacheReadTokens", "cacheWriteTokens", "totalTokens"]) current[key] += Number(usage[key]) || 0;
       dailyMap.set(item.day, current);
     }
     return { ...totals, daily: [...dailyMap.values()].sort((a, b) => b.day.localeCompare(a.day)), machines };

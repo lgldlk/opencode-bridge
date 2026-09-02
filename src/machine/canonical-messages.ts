@@ -1,5 +1,13 @@
 "use strict";
 
+import type {
+  CanonicalMessage,
+  CanonicalPart,
+  JsonObject,
+  JsonValue,
+  OpenAIMessage,
+} from "../shared/types.ts";
+
 /**
  * Canonical OpenAI message rendering borrowed from the proven
  * opencode-llm-proxy design. OpenCode accepts one prompt string, while
@@ -8,79 +16,81 @@
  * adapters from slowly diverging.
  */
 
-function isObject(value: any) {
+function isObject(value: unknown): value is JsonObject {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function parseArguments(value: any) {
-  if (typeof value !== "string") {
-    return value && typeof value === "object" ? value : {};
-  }
-  try {
-    const parsed = JSON.parse(value);
-    return parsed === undefined ? {} : parsed;
-  } catch {
-    // Preserve malformed/partial arguments as data. The model-facing
-    // transcript must not silently invent or discard fields.
-    return value;
-  }
+function parseArguments(value: unknown): string | JsonObject {
+  // Keep the caller's original JSON text. Parsing and re-stringifying tool
+  // arguments changes whitespace and can change the observable payload even
+  // when the object is semantically equivalent.
+  if (typeof value === "string") return value;
+  return isObject(value) ? value : {};
 }
 
-function normalizeContent(content: any): any[] {
+function normalizeContent(content: unknown): CanonicalPart[] {
   if (typeof content === "string") return [{ type: "text", text: content }];
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((part): any[] => {
+  if (content === null || content === undefined) return [];
+  if (!Array.isArray(content)) return [{ type: "json", value: content as JsonValue }];
+  return content.flatMap((part): CanonicalPart[] => {
     if (typeof part === "string") return [{ type: "text", text: part }];
-    if (!part || typeof part !== "object") return [];
-    const text = part.text ?? part.input_text ?? part.output_text;
+    if (!part || typeof part !== "object") return [{ type: "json", value: part }];
+    const source = part as Record<string, unknown>;
+    const text = source.text ?? source.input_text ?? source.output_text;
     if (typeof text === "string") return [{ type: "text", text }];
-    if (part.type === "json") return [{ type: "json", value: part.value }];
+    if (source.type === "json") return [{ type: "json", value: source.value as JsonValue }];
     // Keep non-text content as opaque structured data instead of coercing it
     // to "[object Object]". OpenCode can still reason over the canonical JSON.
-    return [{ type: "json", value: part }];
+    return [{ type: "json", value: part as JsonValue }];
   });
 }
 
-function canonicalize(messages: any[]) {
+function canonicalize(messages: unknown): CanonicalMessage[] {
   return (Array.isArray(messages) ? messages : []).flatMap((message) => {
     if (!isObject(message) || typeof message.role !== "string") return [];
-    const content: any[] = normalizeContent(message.content);
+    const source = message as OpenAIMessage;
+    const content = normalizeContent(source.content);
 
-    if (message.role === "assistant") {
-      for (const call of Array.isArray(message.tool_calls) ? message.tool_calls : []) {
-        const fn = call?.function ?? call;
+    if (source.role === "assistant") {
+      for (const call of Array.isArray(source.tool_calls) ? source.tool_calls : []) {
+        const fn = call.function ?? call;
         content.push({
           type: "tool_call",
-          id: call?.id || undefined,
-          name: String(fn?.name || ""),
-          arguments: parseArguments(fn?.arguments),
+          id: call.id || undefined,
+          name: String(fn.name || ""),
+          arguments: parseArguments(fn.arguments),
         });
       }
-      if (message.function_call) {
+      if (source.function_call) {
         content.push({
           type: "tool_call",
-          name: String(message.function_call.name || ""),
-          arguments: parseArguments(message.function_call.arguments),
+          name: String(source.function_call.name || ""),
+          arguments: parseArguments(source.function_call.arguments),
         });
       }
     }
 
-    if (message.role === "tool" || message.role === "function") {
+    if (source.role === "tool" || source.role === "function") {
       return [{
+        ...source,
         role: "tool",
         content: [{
           type: "tool_result",
-          id: message.tool_call_id || undefined,
-          name: message.name || undefined,
-          content: normalizeContent(message.content),
+          id: source.tool_call_id || undefined,
+          name: source.name || undefined,
+          content: normalizeContent(source.content),
         }],
       }];
     }
-    return [{ role: message.role, content }];
+    // Retain all caller-supplied message metadata. Only `content` is
+    // normalized because OpenCode's prompt endpoint accepts text rather than
+    // an OpenAI message array; unknown fields must not disappear at the
+    // protocol boundary.
+    return [{ ...source, role: source.role, content }];
   });
 }
 
-function renderPart(part: any) {
+function renderPart(part: CanonicalPart): JsonValue {
   if (part?.type === "text") return part.text;
   if (part?.type === "json") return part.value;
   if (part?.type === "tool_call") {
@@ -99,21 +109,25 @@ function renderPart(part: any) {
       content: (part.content || []).map(renderPart),
     };
   }
-  return part;
+  return part as unknown as JsonValue;
 }
 
-function renderOpenCodePrompt(input: any) {
-  const messages = canonicalize(Array.isArray(input) ? input : input?.messages);
+function renderOpenCodePrompt(input: unknown) {
+  const source = isObject(input) ? input : {};
+  const messages = canonicalize(Array.isArray(input) ? input : source.messages);
   const upstreamSystem = messages
     .filter((message) => message.role === "system" || message.role === "developer")
     .flatMap((message) => message.content || [])
-    .filter((part) => part?.type === "text")
-    .map((part) => part.text)
+    .map((part) => {
+      const rendered = renderPart(part);
+      return typeof rendered === "string" ? rendered : JSON.stringify(rendered);
+    })
     .join("\n\n")
     .trim();
   const conversation = messages.filter((message) => message.role !== "system" && message.role !== "developer");
   if (conversation.length === 1 && conversation[0].role === "user" && conversation[0].content.length === 1) {
-    return { system: upstreamSystem, text: String(conversation[0].content[0].text || ""), messages };
+    const firstPart = conversation[0].content[0];
+    return { system: upstreamSystem, text: firstPart.type === "text" ? firstPart.text : String(renderPart(firstPart) ?? ""), messages };
   }
 
   // OpenCode's HTTP API accepts one prompt text rather than an OpenAI
@@ -121,10 +135,16 @@ function renderOpenCodePrompt(input: any) {
   // reference proxy. The framing stays in the user prompt because OpenCode
   // only accepts one text part; the relay itself guarantees that this input
   // can never be emitted as assistant output.
-  const transcript = conversation.map((message) => JSON.stringify({
-    role: message.role,
-    content: (message.content || []).map(renderPart),
-  })).join("\n");
+  const transcript = conversation.map((message) => {
+    // Tool calls are already represented once in canonical `content` as
+    // `tool_call` parts. Keeping the original OpenAI fields alongside them
+    // would duplicate every call in the model-facing transcript.
+    const { tool_calls: _toolCalls, function_call: _functionCall, ...rest } = message;
+    return JSON.stringify({
+      ...rest,
+      content: (message.content || []).map(renderPart),
+    });
+  }).join("\n");
   const text = transcript;
   const system = upstreamSystem;
 
