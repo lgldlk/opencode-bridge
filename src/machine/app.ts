@@ -102,7 +102,17 @@ function start(config: MachineAppConfig = machineConfig()): Server {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 15_000);
   });
-  const close = () => server.close(() => process.exit(0));
+  let shuttingDown = false;
+  const close = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Do not wait for an in-flight SSE/model request during deploys. Closing
+    // active sockets propagates `close` to chat handlers, which aborts their
+    // OpenCode request and lets systemd stop the unit promptly.
+    server.closeAllConnections?.();
+    server.closeIdleConnections?.();
+    server.close(() => process.exit(0));
+  };
   process.once("SIGTERM", close);
   process.once("SIGINT", close);
   server.listen(config.port, config.host, () => console.log(`opencode bridge listening on http://${config.host}:${config.port}`));
@@ -113,6 +123,7 @@ async function routeSafe(app: MachineApplication, req: IncomingMessage, res: Ser
   try {
     await app.route(req, res);
   } catch (error) {
+    if (res.headersSent || res.writableEnded) return;
     json(res, error.status || 500, { error: { message: error.message, type: "bridge_error" } });
   }
 }

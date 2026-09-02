@@ -116,10 +116,20 @@ function start(config: ManagerConfig = managerConfig()): Server {
     socket.setNoDelay(true);
     socket.setKeepAlive(true, 15_000);
   });
-  const close = () => server.close(() => {
-    app.registry.close?.();
-    process.exit(0);
-  });
+  let shuttingDown = false;
+  const close = () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // Deploys must not wait for a long-lived completion stream. Destroying
+    // active sockets causes the proxy to abort its upstream request and lets
+    // systemd restart the manager without a 90-second stop timeout.
+    server.closeAllConnections?.();
+    server.closeIdleConnections?.();
+    server.close(() => {
+      app.registry.close?.();
+      process.exit(0);
+    });
+  };
   process.once("SIGTERM", close);
   process.once("SIGINT", close);
   server.listen(config.port, config.host, () => {
@@ -133,6 +143,7 @@ async function routeSafe(app: ManagerApplication, req: IncomingMessage, res: Ser
   try {
     await app.route(req, res);
   } catch (error) {
+    if (res.headersSent || res.writableEnded) return;
     json(res, error.status || 500, { error: { message: error.message, type: "manager_error" } });
   }
 }
