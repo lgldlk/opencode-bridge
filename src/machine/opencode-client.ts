@@ -27,6 +27,11 @@ export interface OpenCodeClient {
   subscribeEvents: (signal: AbortSignal | undefined, onEvent: (event: JsonValue) => void) => { ready: Promise<void>; done: Promise<void> };
 }
 
+function mcpRequestTimeoutMs(): number {
+  const configured = Number(process.env.OPENCODE_MCP_REQUEST_TIMEOUT_MS || 15_000);
+  return Number.isFinite(configured) && configured > 0 ? configured : 15_000;
+}
+
 function createOpenCodeClient({ url, username, password, directory, requestTimeoutMs }: OpenCodeClientConfig): OpenCodeClient {
   const authorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
   // These caches contain only remote capability metadata. Conversation
@@ -44,11 +49,19 @@ function createOpenCodeClient({ url, username, password, directory, requestTimeo
 
     return new Promise<HttpTextResponse>((resolve, reject) => {
       let settled = false;
-      const finish = (callback: (value: HttpTextResponse) => void, value: HttpTextResponse): void => {
-        if (settled) return;
+      const cleanup = (): boolean => {
+        if (settled) return false;
         settled = true;
         signal?.removeEventListener("abort", onAbort);
-        callback(value);
+        return true;
+      };
+      const resolveOnce = (value: HttpTextResponse): void => {
+        if (!cleanup()) return;
+        resolve(value);
+      };
+      const rejectOnce = (error: unknown): void => {
+        if (!cleanup()) return;
+        reject(error);
       };
       const abortError = () => {
         const reason = signal?.reason;
@@ -61,11 +74,11 @@ function createOpenCodeClient({ url, username, password, directory, requestTimeo
       }, (response: IncomingMessage) => {
         const chunks: Buffer[] = [];
         response.on("data", (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)));
-        response.once("end", () => finish(resolve, {
+        response.once("end", () => resolveOnce({
           status: response.statusCode || 0,
           text: Buffer.concat(chunks).toString("utf8"),
         }));
-        response.once("error", (error: Error) => reject(error));
+        response.once("error", rejectOnce);
       });
       const onAbort = () => request.destroy(abortError());
 
@@ -76,7 +89,7 @@ function createOpenCodeClient({ url, username, password, directory, requestTimeo
           { name: "TimeoutError" },
         ));
       });
-      request.once("error", (error: Error) => reject(error));
+      request.once("error", rejectOnce);
       signal?.addEventListener("abort", onAbort, { once: true });
       if (signal?.aborted) {
         onAbort();
@@ -121,6 +134,7 @@ function createOpenCodeClient({ url, username, password, directory, requestTimeo
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ name, config }),
+      timeoutMs: mcpRequestTimeoutMs(),
     });
   }
 
@@ -129,6 +143,7 @@ function createOpenCodeClient({ url, username, password, directory, requestTimeo
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
+      timeoutMs: mcpRequestTimeoutMs(),
     });
   }
 
@@ -137,6 +152,7 @@ function createOpenCodeClient({ url, username, password, directory, requestTimeo
       method: "POST",
       headers: { "content-type": "application/json" },
       body: "{}",
+      timeoutMs: mcpRequestTimeoutMs(),
     });
   }
 
